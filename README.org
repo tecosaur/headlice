@@ -1,0 +1,8 @@
+#+title: Headlice
+#+subtitle: Automatic license header insertion for Emacs
+#+author: tecosaur
+
+Insert appropriate license headers into files upon creation, when the global
+minor mode =headlice-mode= is enabled.
+
+The function ~headlice-auto-insert~ can also be added as a hook to specific modes.
