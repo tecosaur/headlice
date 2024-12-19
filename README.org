@@ -2,7 +2,18 @@
 #+subtitle: Automatic license header insertion for Emacs
 #+author: tecosaur
 
-Insert appropriate license headers into files upon creation, when the global
-minor mode =headlice-mode= is enabled.
+Headlice aims to help you follow best practices with software you work on. Much
+of the time, dealing with copyright is a chore, but it's also highly important
+when performing open-source development. Beyond just picking a license and
+chucking it in a license file, there are [[https://matija.suklje.name/how-and-why-to-properly-write-copyright-statements-in-your-code][strong]] [[https://reuse.software/][arguments]] to be made for
+including authorship and short-form license information in every (significant)
+file. Even if it's not required by the license you've chosen, it helps others
+abide by attribution requirements when re-using your work.
 
-The function ~headlice-auto-insert~ can also be added as a hook to specific modes.
+Headlice makes this easier by automatically inserting license headers into files
+upon creation. This can be done by either adding ~headlice-auto-insert~ to a mode
+hook, or enabling the global minor mode =headlice-mode=. To add headers to a
+project, ~headlice-infest~ will check all code files and insert missing headers.
+
+Headlice also helps streamline creation of the =LICENSE= file in new projects,
+just call ~headlice-create-license~.

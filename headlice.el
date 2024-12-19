@@ -45,14 +45,14 @@
       (bsd-3
        :template ,(file-name-concat licenses-dir "bsd-3.txt")
        :spdx "BSD-3-Clause")
-      (apache-2
+      (apache
        :template ,(file-name-concat licenses-dir "apache-2.txt")
        :header ,(file-name-concat headers-dir "apache-2.txt")
        :spdx "Apache-2.0")
-      (eupl-1_2-en
+      (eupl
        :template ,(file-name-concat licenses-dir "eupl-1.2_en.txt")
        :spdx "EUPL-1.2")
-      (mpl-2
+      (mpl
        :template ,(file-name-concat licenses-dir "mpl-2.txt")
        :header ,(file-name-concat headers-dir "mpl-2.txt")
        :spdx "MPL-2.0")
@@ -105,6 +105,18 @@ This can either be t/nil, or a list of licenses which SPDX should be used for."
   :type '(choice (const t :tag "Always") (const nil :tag "Never")
           (repeat symbol)))
 
+(defcustom headlice-state-copyright-holder t
+  "Whether to (re)state the copyright holder in headers."
+  :type 'boolean)
+
+(defcustom headlice-blank-line-after-header t
+  "Whether to insert a blank line after a license header."
+  :type 'boolean)
+
+(defcustom headlice-user-email nil
+  "The default email to use when setting copyright information."
+  :type '(choice string (const nil)))
+
 (defcustom headlice-limit-licenses nil
   "When set, headers are only added for these licenses.
 See `headlice-license-specs' for a list of known license."
@@ -121,8 +133,22 @@ See `headlice-license-specs' for a list of known license."
 
 ;;;; Internal variables:
 
+(defconst headlice--copyright-regexp
+  "[Cc]opyright:?\\s *\\(?:©\\|(C)\\|(c)\\)\\s *\\([0-9-, ]+\\)\\s *\\([^\n]+\\)")
+
+(defconst headlice--spdx-text-regexp
+  "SPDX-FileCopyrightText:\\s *©? *\\([0-9-, ]+\\)\\s *\\([^\n]+\\)")
+
+(defconst headlice--spdx-license-regexp
+  "SPDX-License-Identifier: \\([^ \t\n]+\\)")
+
+(defconst headlice--copyright-holder-email-regexp
+  "[^<]+<[^>]@[^>]>")
+
 (defvar headlice--cache (make-hash-table :test 'equal)
   "Cache of detected licenses. Maps project roots to cached results.")
+
+(defvar headlice--mode-comment-prefixes nil)
 
 ;;;; Minor mode:
 
@@ -145,8 +171,8 @@ See `headlice-license-specs' for a list of known license."
   "Attempt to find the root project of DIR, defaulting to `default-directory'.
 Returns nil if no root project could be identified."
   (or (and (featurep 'project)
-           (project-current dir)
-           (project-root (project-current dir)))
+           (project-current nil dir)
+           (project-root (project-current nil dir)))
       (and (featurep 'projectile)
            (projectile-project-root))))
 
@@ -184,37 +210,238 @@ If a license could be identified, this result is cached."
             ))))
     license))
 
-(defun headlice--file-words (filepath &optional interpret-special-p)
-  "Return a list of all words in FILEPATH.
+(defun headlice--file-license (&optional file)
+  "Get the license of FILE, defaulting to the current buffer's file."
+  (if file
+      (if-let ((buf (if (equal file buffer-file-name)
+                        (current-buffer)
+                      (get-file-buffer file))))
+          (with-current-buffer buf
+            (headlice--file-license))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (setq buffer-file-name file)
+          (let ((cstart (headlice--comment-prefixes (headlice--guess-mode))))
+            (setq comment-start (car cstart)
+                  comment-start-skip (cdr cstart)))
+          (prog1
+              (headlice--file-license)
+            (set-buffer-modified-p nil))))
+    (let (license)
+      (save-excursion
+        (goto-char (point-min))
+        (dolist (license-spec headlice-license-specs)
+          (when-let (((not license))
+                     (header (plist-get (cdr license-spec) :header))
+                     (license-match
+                      (with-silent-modifications
+                        (headlice--match-contents header (current-buffer)))))
+            (setq license (cons (car license-spec)
+                                (cdr license-match)))))
+        (unless license
+          (when-let ((license-spdx
+                      (and (re-search-forward headlice--spdx-license-regexp nil t)
+                           (match-string-no-properties 1))))
+            (dolist (spec headlice-license-specs)
+              (unless license
+                (when (equal license-spdx (plist-get (cdr spec) :spdx))
+                  (setq license (cons (car spec) nil)))))
+            (when license
+              (goto-char (point-min))
+              (when-let (((re-search-forward headlice--spdx-text-regexp nil t))
+                         (year (match-string-no-properties 1))
+                         (authors (match-string-no-properties 2))
+                         ((progn
+                            (beginning-of-line)
+                            (re-search-forward comment-start-skip (match-beginning 0) t))))
+                (setcdr license (list (cons "year" year) (cons "authors" authors))))))))
+      license)))
+
+(defun headlice--file-copyright (&optional file)
+  "TODO."
+  (if file
+      (if-let ((buf (get-file-buffer file)))
+          (with-current-buffer buf
+            (headlice--file-copyright))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (setq buffer-file-name file)
+          (setq comment-start-skip
+                (cdr (headlice--comment-prefixes (headlice--guess-mode))))
+          (prog1
+              (headlice--file-copyright)
+            (set-buffer-modified-p nil))))
+    (save-excursion
+      (goto-char (point-min))
+      (when-let ((match (or
+                         (re-search-forward headlice--spdx-text-regexp nil t)
+                         (re-search-forward headlice--copyright-regexp nil t)))
+                 (year (match-string-no-properties 1))
+                 (authors (match-string-no-properties 2))
+                 (is-comment
+                  (progn
+                    (beginning-of-line)
+                    (re-search-forward comment-start-skip (match-beginning 0) t))))
+        (list (cons "year" year)
+              (cons "authors" authors))))))
+
+(defun headlice--comment-prefixes (mode)
+  "TODO."
+  (or (alist-get mode headlice--mode-comment-prefixes)
+      (cdar (push (with-temp-buffer
+                    (funcall mode)
+                    (comment-normalize-vars)
+                    (cons mode (cons comment-start comment-start-skip)))
+                  headlice--mode-comment-prefixes))))
+
+(defun headlice--guess-mode ()
+  "Guess the appropriate major mode for the current file.
+Largely copied from `set-auto-mode'."
+  (let (mode)
+    (save-excursion
+      (goto-char (point-min))
+      (skip-chars-forward " \t\n")
+      (and enable-local-variables
+           (not (inhibit-local-variables-p))
+           (setq end (set-auto-mode-1))
+           (if (save-excursion (search-forward ":" end t))
+               ;; Find all specifications for the `mode:' variable
+               ;; and execute them left to right.
+               (while (let ((case-fold-search t))
+                        (or (and (looking-at "mode:")
+                                 (goto-char (match-end 0)))
+                            (re-search-forward "[ \t;]mode:" end t)))
+                 (skip-chars-forward " \t")
+                 (let ((beg (point)))
+                   (if (search-forward ";" end t)
+                       (forward-char -1)
+                     (goto-char end))
+                   (skip-chars-backward " \t")
+                   (push (intern-soft (concat (downcase (buffer-substring beg (point))) "-mode"))
+                         mode)))
+             ;; Simple -*-MODE-*- case.
+             (push (intern-soft (concat (downcase (buffer-substring (point) end))
+                                        "-mode"))
+                   mode)))
+      (setq mode (car (cl-remove-if-not #'functionp mode)))
+      (unless mode
+        (let ((name (file-name-sans-versions buffer-file-name))
+              (remote-id (file-remote-p buffer-file-name)))
+          (when (and (stringp remote-id)
+                     (string-match (regexp-quote remote-id) name))
+            (setq name (substring name (match-end 0))))
+          (while name
+            ;; Find first matching alist entry.
+            (setq mode (assoc-default name auto-mode-alist 'string-match))
+            (if (and mode
+                     (not (functionp mode))
+                     (consp mode)
+                     (cadr mode))
+                (setq mode (car mode)
+                      name (substring name 0 (match-beginning 0)))
+              (setq name nil)))))
+      mode)))
+
+(defun headlice--file-authors (&optional file)
+  "Attempt to identify the relevant authors of FILE."
+  (cdr (or (assoc "authors" (headlice--file-copyright file))
+           (assoc "authors" (headlice--file-license file)))))
+
+(defvar headlice--files-to-sample 10)
+
+(defun headlice--sample-dir-files (fn dir)
+  "TODO."
+  (let* ((code-files (headlice--find-code-files dir))
+         (nfiles (length code-files))
+         results)
+    (if (< nfiles 100)
+        (let ((seq (vconcat (number-sequence 0 (1- nfiles)))))
+          (let ((n (length seq)))
+            (dotimes (i n)
+              (cl-rotatef (elt seq i) (elt seq (+ i (random (- n i)))))))
+          (cl-loop
+           for i in (append seq nil)
+           while (< (length results) headlice--files-to-sample)
+           for result = (funcall fn (elt code-files i))
+           when result
+           do (push result results))
+          results)
+      (dotimes (_ headlice--files-to-sample)
+        (push (funcall fn (elt code-files (random nfiles)))
+              results)))
+    (setq results (delete-dups results))
+    results))
+
+(defun headlice--project-authors (&optional dir)
+  "TODO."
+  (or (cdr (assoc "authors" (cdr (headlice--project-license dir))))
+      (let ((authors (headlice--sample-dir-files #'headlice--file-authors (or dir default-directory))))
+        (and (= (length (delete-dups authors)))
+             (car authors)))))
+
+(defun headlice--get-words (source &optional interpret-special-p word-limit)
+  "Return a list of all words in SOURCE, up to WORD-LIMIT.
+SOURCE may be a buffer, or a file path.
 The following special forms an interpreted when INTERPRET-SPECIAL-P is non-nil:
   {{placeholder}}
   ??optional content??"
-  (with-temp-buffer
-    (insert-file-contents filepath)
-    (downcase-region (point-min) (point-max))
-    (goto-char (point-min))
-    (text-mode)
-    (let ((pos (point)) words)
-      (while (not (eobp))
-        (let ((syntax (syntax-class (syntax-after (point)))))
-          (cond
-           ((and interpret-special-p
-                 (eq (char-after) ?{)
-                 (re-search-forward "{{\\([^\n]*?\\)}}" nil t))
-            (push (cons 'placeholder (match-string 1)) words))
-           ((and interpret-special-p
-                 (eq (char-after) ??)
-                 (re-search-forward "\\?\\?\\([^[^\n]*?\\)\\?\\?" nil t))
-            (dolist (word (split-string (match-string 1) "\\Sw" t))
-              (push (cons 'optional word) words)))
-           ((memq syntax '(1 2))
-            (skip-syntax-forward (string (syntax-class-to-char syntax)))
-            (push (cons pos (buffer-substring-no-properties pos (point)))
-                  words))
-           (t
-            (skip-syntax-forward (string (syntax-class-to-char syntax)))))
-          (setq pos (point))))
-      (nreverse words))))
+  (cond
+   ((and (bufferp source)
+         (eq (syntax-table) text-mode-syntax-table))
+    (let ((pos (point))
+          (words-count 0)
+          (word-limit (or word-limit most-positive-fixnum))
+          words)
+      (save-excursion
+        (while (and (not (eobp)) (< words-count word-limit))
+          (let ((syntax (syntax-class (syntax-after (point)))))
+            (cond
+             ((and interpret-special-p
+                   (eq (char-after) ?{)
+                   (re-search-forward "{{\\([^\n]*?\\)}}" nil t))
+              (push (cons 'placeholder (match-string 1)) words))
+             ((and interpret-special-p
+                   (eq (char-after) ??)
+                   (re-search-forward "\\?\\?\\([^[^\n]*?\\)\\?\\?" nil t))
+              (dolist (word (split-string (match-string 1) "\\Sw" t))
+                (push (cons 'optional word) words)
+                (cl-incf words-count)))
+             ((memq syntax '(1 2))
+              (skip-syntax-forward (string (syntax-class-to-char syntax)))
+              (push (cons pos (buffer-substring-no-properties pos (point)))
+                    words)
+              (cl-incf words-count))
+             (t
+              (skip-syntax-forward (string (syntax-class-to-char syntax)))))
+            (setq pos (point)))))
+      (nreverse words)))
+   ((bufferp source)
+    (let ((tempbuf (generate-new-buffer " *headlice-wordification*"))
+          (syntax (with-current-buffer source (syntax-table)))
+          words)
+      (with-current-buffer tempbuf
+        (insert-buffer-substring source)
+        (dolist (var '(major-mode uncomment-region-function comment-start
+                       comment-add comment-end comment-padding comment-continue
+                       comment-end-skip comment-multi-line comment-start-skip
+                       comment-use-syntax comment-quote-nested
+                       comment-inline-offset))
+          (set (make-local-variable var) (buffer-local-value var source)))
+        (with-syntax-table syntax
+          (uncomment-region (point-min) (point-max)))
+        (goto-char (point-min))
+        (downcase-region (point-min) (point-max))
+        (with-syntax-table text-mode-syntax-table
+          (setq words (headlice--get-words (current-buffer) interpret-special-p word-limit))))
+      (kill-buffer tempbuf)
+      words))
+   ((and (stringp source) (file-exists-p source))
+    (with-temp-buffer
+      (insert-file-contents source)
+      (downcase-region (point-min) (point-max))
+      (goto-char (point-min))
+      (text-mode)
+      (headlice--get-words (current-buffer) interpret-special-p word-limit)))))
 
 (defun headlice--fill-template (&optional placeholders prompt-prefix)
   "Search for all placeholders in the current buffer, and fill them.
@@ -243,38 +470,118 @@ PROMPT-PREFIX)."
 ;;;###autoload
 (defun headlice-auto-insert (&optional force)
   "Automatically insert a license header, as appropriate.
-With \\[universal-argument] FORCE, ignore suitability.
+With FORCE, insert regardless of whether the buffer seems suitable.
+With \\[universal-argument] FORCE, ask for the license type if ambiguous.
 With \\[universal-argument] \\[universal-argument] FORCE, insert at point."
-  (interactive "P")
+  (interactive (list (or current-prefix-arg (list 1))))
   (when-let (((or force (headlice--suitable-buffer-p)))
-             (license (headlice--project-license))
+             (license (or (headlice--project-license)
+                          (and (consp force)
+                               (cons (or (and (> (car force) 1)
+                                              headlice-preferred-license)
+                                         (headlice--pick-license))
+                                     headlice-license-fields-autofills))))
              ((or force
                   (if headlice-limit-licenses
                       (memq (car license) headlice-limit-licenses)
                     (not (memq (car license) headlice-ignored-licenses)))))
              (spec (alist-get (car license) headlice-license-specs)))
-    (save-excursion
-      (unless (and (consp force) (> (car force) 4))
-        (goto-char (point-min)))
-      (cond
-       ((and (or (eq headlice-use-spdx-headers t)
-                 (and (consp headlice-use-spdx-headers)
-                      (memq (car license) headlice-use-spdx-headers)))
-             (plist-get spec :spdx))
-        (insert (string-trim-right (or comment-start "") " ")
-                (and comment-start)
-                "SPDX-License-Identifier: "
-                (plist-get spec :spdx) "\n"))
-       ((plist-get spec :header)
-        (let ((header-lines
-               (with-temp-buffer
-                 (insert-file-contents (plist-get spec :header))
-                 (headlice--fill-template (cdr license))
-                 (split-string (buffer-string) "\n" t)))
-              (comment-prefix
-               (string-trim-right (or comment-start "") " ")))
-          (dolist (line header-lines)
-            (insert comment-prefix (and comment-start " ") line "\n"))))))))
+    (unless (and (consp force) (> (car force) 4))
+      (goto-char (point-min)))
+    (cond
+     ((and (or (eq headlice-use-spdx-headers t)
+               (and (consp headlice-use-spdx-headers)
+                    (memq (car license) headlice-use-spdx-headers)))
+           (plist-get spec :spdx))
+      (let ((insert-start (point)))
+        (when headlice-state-copyright-holder
+          (insert "SPDX-FileCopyrightText: © "
+                  (headlice--get-year license)
+                  " "
+                  (headlice--get-authors license default-directory)
+                  "\n"))
+        (insert "SPDX-License-Identifier: " (plist-get spec :spdx) "\n")
+        (comment-region insert-start (point))
+        (when headlice-blank-line-after-header
+          (insert "\n"))))
+     ((plist-get spec :header)
+      (let ((insert-start (point))
+            (target-buffer (current-buffer))
+            (comment-empty-lines t))
+        (with-temp-buffer
+          (insert-file-contents (plist-get spec :header))
+          (headlice--fill-template (cdr license))
+          (goto-char (point-min))
+          (when (and headlice-state-copyright-holder
+                     (not (re-search-forward headlice--copyright-regexp nil t)))
+            (insert "Copyright © "
+                    (headlice--get-year license)
+                    " "
+                    (headlice--get-authors license default-directory)
+                    "\n"))
+          (insert-into-buffer target-buffer))
+        (comment-region insert-start (point))
+        (when headlice-blank-line-after-header
+          (insert "\n")))))))
+
+(defun headlice--insert-if-absent ()
+  "TODO."
+  (when-let (((headlice--suitable-buffer-p t))
+             (license (headlice--project-license))
+             ((not (headlice--file-license))))
+    (headlice-auto-insert 1)
+    t))
+
+;;;###autoload
+(defun headlice-infest (&optional dir)
+  "Add license headers to all files in the current project (under DIR)."
+  (interactive)
+  (let* ((files (headlice--find-code-files (or dir (headlice--project-root))))
+         (nfiles (length files))
+         (nchecked 0)
+         (ninserted 0))
+    (dolist (file files)
+      (message "Checking %s... [%s/%s]" file (cl-incf nchecked) nfiles)
+      (if-let ((buf (get-file-buffer file)))
+          (with-current-buffer buf
+            (when (headlice--insert-if-absent)
+              (cl-incf ninserted)))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (rename-buffer (file-name-nondirectory file))
+          (setq buffer-file-name file)
+          (let ((delay-mode-hooks t))
+            (normal-mode))
+          (comment-normalize-vars)
+          (when (headlice--insert-if-absent)
+            (cl-incf ninserted)
+            (save-buffer))
+          (set-buffer-modified-p nil))))
+    (message "Checked %s files, inserted %s headers" (length files) ninserted)))
+
+(defun headlice--get-year (license)
+  "Get or set the year in LICENSE."
+  (cdr (or (assoc "year" (cdr license))
+           (car (push
+                 (cons "year"
+                       (format-time-string "%Y"))
+                 (cdr license))))))
+
+(defun headlice--get-authors (license &optional dir)
+  "Get or set the author in LICENSE, optionally searching in DIR."
+  (or (cdr (assoc "authors" (cdr license)))
+      (let ((authors
+             (or
+              (and dir (or (headlice--project-authors dir)
+                           (let ((root (headlice--project-root dir)))
+                             (and (not (equal root dir))
+                                  (headlice--project-authors root)))))
+              (let ((name (read-string "Copyright holder: " user-full-name))
+                    (email (read-string "Contact email (recommended): " (or headlice-user-email ""))))
+                (if (string-empty-p email)
+                    name
+                  (format "%s <%s>" name email))))))
+        (cdar (push (cons "authors" authors) (cdr license))))))
 
 ;;;###autoload
 (defun headlice-create-license (&optional explicit-choice)
@@ -290,58 +597,84 @@ regardless of `headlice-preferred-license'.
 With \\[universal-argument] \\[universal-argument] prefix EXPLICIT-CHOICE, ask
 for the target directory regardless of the detected project root."
   (interactive "P")
-  (message "EC: %S" explicit-choice)
-  (when-let ((license-buf
-              (if (and buffer-file-name
-                       (not buffer-read-only)
-                       (not (memq (aref (buffer-name) 0) '(?* ?\s)))
-                       (member (file-name-base buffer-file-name)
-                               (mapcar #'file-name-base
-                                       headlice-license-filenames))
-                       (member (file-name-extension buffer-file-name)
-                               '(nil "txt"))
-                       (or (and (bobp) (eobp)
-                                (not (file-exists-p buffer-file-name))
-                                (not (buffer-modified-p))
-                                (null (buffer-base-buffer)))
-                           (yes-or-no-p "Replace the current content? ")))
-                  (current-buffer)
-                (let ((filepath
-                       (expand-file-name
-                        headlice-preferred-filename
-                        (or (and (or (not (consp explicit-choice))
-                                     (< (car explicit-choice) 16))
-                                 (headlice--project-root))
-                            (read-directory-name "Project root: ")))))
-                  (and (or (not (file-exists-p filepath))
-                           (yes-or-no-p (format "Replace existing %s? " filepath)))
-                           (find-file-noselect filepath)))))
-             (selected-license
-              (or (and (not explicit-choice)
-                       headlice-preferred-license)
-                  (let ((license-entries
-                         (mapcar
-                          (lambda (s) (cons (plist-get (cdr s) :spdx) (car s)))
-                          headlice-license-specs)))
-                    (cdr (assoc (completing-read "License: " license-entries nil t)
-                                license-entries)))))
-             (template-file
-              (plist-get (cdr (assoc selected-license headlice-license-specs)) :template)))
-    (with-current-buffer license-buf
-      (insert-file-contents template-file)
-      (headlice--fill-template nil (format "(%s) " selected-license))
-      (basic-save-buffer))))
+  (let* ((license-buf
+          (if (and buffer-file-name
+                   (not buffer-read-only)
+                   (not (memq (aref (buffer-name) 0) '(?* ?\s)))
+                   (member (file-name-base buffer-file-name)
+                           (mapcar #'file-name-base
+                                   headlice-license-filenames))
+                   (member (file-name-extension buffer-file-name)
+                           '(nil "txt"))
+                   (or (and (bobp) (eobp)
+                            (not (file-exists-p buffer-file-name))
+                            (not (buffer-modified-p))
+                            (null (buffer-base-buffer)))
+                       (yes-or-no-p "Replace the current content? ")))
+              (current-buffer)
+            (let ((filepath
+                   (expand-file-name
+                    headlice-preferred-filename
+                    (or (and (or (not (consp explicit-choice))
+                                 (< (car explicit-choice) 16))
+                             (headlice--project-root))
+                        (read-directory-name "Project root: ")))))
+              (and (or (not (file-exists-p filepath))
+                       (yes-or-no-p (format "Replace existing %s? " filepath)))
+                   (find-file-noselect filepath)))))
+         (selected-license
+          (or (and (not explicit-choice)
+                   headlice-preferred-license)
+              (headlice--pick-license)))
+         (template-file
+          (plist-get (cdr (assoc selected-license headlice-license-specs)) :template)))
+    (if template-file
+        (with-current-buffer license-buf
+          (insert-file-contents template-file)
+          (headlice--fill-template nil (format "(%s) " selected-license))
+          (basic-save-buffer)
+          (message "Created license file %s" (propertize (buffer-file-name) 'face 'font-lock-builtin-face)))
+      (unless (eq (current-buffer) license-buf)
+        (kill-buffer license-buf))
+      (user-error "Could not create license, no template for `%s' could be located" selected-license))))
 
-(defun headlice--suitable-buffer-p ()
+(defun headlice--pick-license ()
+  "Select a license name from `headlice-license-specs'."
+  (let ((license-entries
+         (mapcar
+          (lambda (s) (cons (plist-get (cdr s) :spdx) (car s)))
+          headlice-license-specs)))
+    (cdr (assoc (completing-read "License: " license-entries nil t)
+                license-entries))))
+
+(defun headlice--find-code-files (&optional root)
+  "List all files under ROOT that seem licensable."
+  (let ((dir (expand-file-name (or root default-directory))))
+    (directory-files-recursively dir
+                                 (string-join (headlice--prog-file-regexps) "\\|"))))
+
+(defun headlice--prog-file-regexps ()
+  "List all regexps that match a prog-derived mode in `auto-mode-alist'."
+  (cl-loop
+   for mode in auto-mode-alist
+   when (symbolp (cdr mode))
+   when (provided-mode-derived-p (cdr mode) 'prog-mode)
+   collect (car mode)))
+
+;;; Fuzzy license matching
+
+(defun headlice--suitable-buffer-p (&optional allow-existing)
   "Whether the current buffer is a suitable target for license insertion."
   (and buffer-file-name
        (not buffer-read-only)
-       (bobp) (eobp) ; Is empty
+       (or allow-existing
+           (and (bobp) (eobp)))
        (not (memq (aref (buffer-name) 0) '(?* ?\s))) ; Isn't a "special" buffer
        (not (bound-and-true-p org-capture-current-plist)) ; Isn't an org-capture buffer
-       (not (file-exists-p buffer-file-name)) ; Is a new file
-       (not (buffer-modified-p)) ; Hasn't been modified
-       (null (buffer-base-buffer)) ; Isn't an indirect clone
+       (or allow-existing
+           (and (not (file-exists-p buffer-file-name)) ; Is a new file
+                (not (buffer-modified-p)) ; Hasn't been modified
+                (null (buffer-base-buffer)))) ; Isn't an indirect clone
        (apply #'derived-mode-p headlice-enabled-modes)
        t))
 
@@ -439,11 +772,11 @@ or nil if no match."
                   (- seen-len placeholder-words))
                placeholders))))
 
-(defun headlice--match-contents (ref-file test-file)
-  "Match TEST-FILE against REF-FILE.
+(defun headlice--match-contents (reference test)
+  "Match TEST against REFERENCE.
 Returns the match proportion and all identified placeholders, or nil."
-  (let ((ref-words-vec (vconcat (headlice--file-words ref-file t)))
-        (seen-words-vec (vconcat (headlice--file-words test-file)))
+  (let ((ref-words-vec (vconcat (headlice--get-words reference t)))
+        (seen-words-vec (vconcat (headlice--get-words test)))
         (seen-start -1)
         result)
     (while (and (not result) seen-start)
@@ -451,19 +784,28 @@ Returns the match proportion and all identified placeholders, or nil."
             result (headlice--match-contents-1 ref-words-vec seen-words-vec seen-start)))
     (and result
          (cons (car result)
-               (headlice--extract-placeholder-values test-file (cdr result))))))
+               (headlice--extract-placeholder-values (cdr result) test)))))
 
-(defun headlice--extract-placeholder-values (file placeholder-positions)
-  "Extract placeholders from FILE according to PLACEHOLDER-POSITIONS."
-  (with-temp-buffer
-    (insert-file-contents file)
+(defun headlice--extract-placeholder-values (placeholder-positions &optional source)
+  "Extract placeholders according to PLACEHOLDER-POSITIONS.
+If SOURCE is nil, the placeholders are extracted from the current buffer.
+A different buffer or file path can also be provided as SOURCE."
+  (cond
+   ((null source)
     (let (placeholders)
       (dolist (name-position placeholder-positions)
         (push (cons (car name-position)
                     (string-trim
                      (buffer-substring (cadr name-position) (cddr name-position))))
               placeholders))
-      (nreverse placeholders))))
+      (nreverse placeholders)))
+   ((bufferp source)
+    (with-current-buffer source
+      (headlice--extract-placeholder-values placeholder-positions)))
+   ((and (stringp source) (file-exists-p source))
+    (with-temp-buffer
+      (insert-file-contents source)
+      (headlice--extract-placeholder-values placeholder-positions)))))
 
 (defun headlice-clear-cache ()
   "Clear the project license cache."
