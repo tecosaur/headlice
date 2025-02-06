@@ -579,31 +579,43 @@ Returns t when `headlice-auto-insert' has been run, nil otherwise."
     t))
 
 ;;;###autoload
-(defun headlice-infest (&optional dir)
-  "Add license headers to all files in the current project (under DIR)."
-  (interactive)
-  (let* ((files (headlice--find-code-files (or dir (headlice--project-root))))
-         (nfiles (length files))
-         (nchecked 0)
-         (ninserted 0))
-    (dolist (file files)
-      (message "Checking %s... [%s/%s]" file (cl-incf nchecked) nfiles)
-      (if-let ((buf (get-file-buffer file)))
-          (with-current-buffer buf
-            (when (headlice--insert-if-absent)
-              (cl-incf ninserted)))
-        (with-temp-buffer
-          (insert-file-contents file)
-          (rename-buffer (file-name-nondirectory file))
-          (setq buffer-file-name file)
-          (let ((delay-mode-hooks t))
-            (normal-mode))
-          (comment-normalize-vars)
-          (when (headlice--insert-if-absent)
-            (cl-incf ninserted)
-            (save-buffer))
-          (set-buffer-modified-p nil))))
-    (message "Checked %s files, inserted %s headers" (length files) ninserted)))
+(defun headlice-infest (&optional dir create-license-p)
+  "Add license headers to all files in the current project (under DIR).
+When the CREATE-LICENSE-P argument is set, a license will be created before
+adding headers if the project is currently unlicensed.
+
+When called interactively, DIR is the current working directory and
+CREATE-LICENSE-P is set."
+  (interactive (list nil t))
+  (let* ((root (or dir (headlice--project-root)))
+         (license (headlice--project-license root)))
+    (when (and (not license) create-license-p)
+      (headlice-create-license root)
+      (setq license (headlice--project-license root)))
+    (if license
+        (let* ((files (headlice--find-code-files root))
+               (nfiles (length files))
+               (nchecked 0)
+               (ninserted 0))
+          (dolist (file files)
+            (message "Checking %s... [%s/%s]" file (cl-incf nchecked) nfiles)
+            (if-let ((buf (get-file-buffer file)))
+                (with-current-buffer buf
+                  (when (headlice--insert-if-absent)
+                    (cl-incf ninserted)))
+              (with-temp-buffer
+                (insert-file-contents file)
+                (rename-buffer (file-name-nondirectory file))
+                (setq buffer-file-name file)
+                (let ((delay-mode-hooks t))
+                  (normal-mode))
+                (comment-normalize-vars)
+                (when (headlice--insert-if-absent)
+                  (cl-incf ninserted)
+                  (save-buffer))
+                (set-buffer-modified-p nil))))
+          (message "Checked %s files, inserted %s headers" (length files) ninserted))
+      (message "Cannot infest %s, as it is not under any known license" root))))
 
 (defun headlice--get-year (license)
   "Get or set the year in LICENSE."
