@@ -338,7 +338,7 @@ If a license could be identified, this result is cached."
 (defun headlice--guess-mode ()
   "Guess the appropriate major mode for the current file.
 Largely copied from `set-auto-mode'."
-  (let (mode)
+  (let (mode end)
     (save-excursion
       (goto-char (point-min))
       (skip-chars-forward " \t\n")
