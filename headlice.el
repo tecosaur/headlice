@@ -617,6 +617,87 @@ CREATE-LICENSE-P is set."
           (message "Checked %s files, inserted %s headers" (length files) ninserted))
       (message "Cannot infest %s, as it is not under any known license" root))))
 
+;;;###autoload
+(defun headlice-status (&optional dir)
+  "Report on the licensing status of the files in DIR (the current project)."
+  (interactive "P")
+  (let* ((status (headlice-project-status dir))
+         (files (plist-get status :files))
+         (authors (plist-get status :authors))
+         (num-files (plist-get status :total-files))
+         (num-unlicensed (plist-get status :unlicensed))
+         (license-names
+          (string-join (mapcar #'symbol-name (mapcar #'car files)) "/"))
+         (author-info
+          (cond
+           ((null authors)
+            (propertize "unknown" 'face 'shadow))
+           ((<= 1 (length authors) 2)
+            (string-join authors " and "))
+           (t (format "%s authors" (length authors)))))
+         (unlicensed-info
+          (if (> num-unlicensed 0)
+              (format " (%s unlicensed)" num-unlicensed)
+            "")))
+    (if files
+        (message "%s licensed project by %s encompassing %s file%s%s"
+                 (propertize (upcase license-names) 'face 'font-lock-keyword-face)
+                 (propertize author-info 'face 'font-lock-string-face)
+                 (propertize (number-to-string num-files) 'face 'font-lock-number-face)
+                 (if (= num-files 1) "" "s")
+                 (propertize unlicensed-info 'face 'warning))
+      (message "Unlicensed project"))))
+
+(defun headlice-project-status (&optional dir read-files-p)
+  "Collect information on the license of files under DIR.
+If READ-FILES-P is set, every file will be individually inspected to determine
+their license."
+  (let* ((root (file-truename (or dir default-directory)))
+         project-license
+         (authors-table (make-hash-table :test #'equal))
+         (unlicensed-count 0)
+         (file-count 0)
+         file-licenses
+         last-dir-license
+         (scan-update 0.0)
+         code-files)
+    (with-temp-message (format "Scanning %s…" (directory-file-name root))
+      (redisplay)
+      (setq project-license (headlice--project-license root)
+            code-files (headlice--find-code-files dir))
+      (dolist (code-file code-files)
+        (cl-incf file-count)
+        (when (> (- (float-time) scan-update) 0.2)
+          (message "[%s/%s] Scanning %s…" file-count (length code-files) code-file)
+          (redisplay)
+          (setq scan-update (float-time)))
+        (let* ((parent-dir (file-name-directory code-file))
+               (parent-license
+                (if (equal (car last-dir-license) parent-dir)
+                    (cdr last-dir-license)
+                  (cdr
+                   (setq last-dir-license
+                         (cons parent-dir (headlice--project-license parent-dir))))))
+               (license
+                (if read-files-p
+                    (headlice--file-license code-file)
+                  parent-license))
+               (kind (car license))
+               (authors (cdr (assoc "authors" (cdr license)))))
+          (if kind
+              (if-let ((count (assoc kind file-licenses)))
+                  (cl-incf (cdr count))
+                (push (cons kind 1) file-licenses))
+            (cl-incf unlicensed-count))
+          (when authors
+            (dolist (author (split-string authors "[ \t]*,[ \t]*\\|[ \t]+and[ \t]+"))
+              (puthash author t authors-table))))))
+    (list :project (car project-license)
+          :files (cl-sort file-licenses #'> :key #'cdr)
+          :authors (sort (hash-table-keys authors-table) #'string<)
+          :unlicensed unlicensed-count
+          :total-files file-count)))
+
 (defun headlice--get-year (license)
   "Get or set the year in LICENSE."
   (cdr (or (assoc "year" (cdr license))
