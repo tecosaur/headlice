@@ -21,6 +21,9 @@
 
 (require 'cl-lib)
 
+(eval-when-compile
+  (require 'subr-x))
+
 ;;;; Customisation variables:
 
 (defgroup headlice nil
@@ -130,6 +133,12 @@ See `headlice-license-specs' for a list of known license."
 (defcustom headlice-enabled-modes '(prog-mode)
   "Major modes that the minor mode affects."
   :type '(repeat symbol))
+
+;;;; File search variables:
+
+(defcustom headlice-ignored-directories '(".src" ".svn" ".git" ".hg" ".bzr")
+  "Directory names should not be descended into when looking for files."
+  :type '(repeat string))
 
 ;;;; Internal variables:
 
@@ -647,19 +656,80 @@ for the target directory regardless of the detected project root."
     (cdr (assoc (completing-read "License: " license-entries nil t)
                 license-entries))))
 
-(defun headlice--find-code-files (&optional root)
-  "List all files under ROOT that seem licensable."
-  (let ((dir (expand-file-name (or root default-directory))))
-    (directory-files-recursively dir
-                                 (string-join (headlice--prog-file-regexps) "\\|"))))
+(defun headlice--find-code-files (&optional dir)
+  "List all files under DIR that seem licensable."
+  (let ((root (file-truename (expand-file-name (or dir default-directory))))
+        (ignored-dirnames (append headlice-ignored-directories '("." "..")))
+        path-queue
+        (paths-seen (make-hash-table :test #'equal))
+        (prog-cache (list nil))
+        files)
+    (push (file-name-as-directory root) path-queue)
+    (while path-queue
+      (let ((path (pop path-queue)))
+        (unless (gethash path paths-seen)
+          (cond
+           ((not (file-readable-p path)))
+           ((file-symlink-p path)
+            (let ((realpath (file-truename path)))
+              (when (and (not (gethash realpath paths-seen))
+                         (string-prefix-p root realpath))
+                (push realpath path-queue))))
+           ((directory-name-p path)
+            (dolist (subpath (directory-files path t))
+              (cond
+               ((member (file-name-base subpath) ignored-dirnames))
+               ((file-directory-p subpath)
+                (push (file-name-as-directory subpath) path-queue))
+               ((headlice--prog-file-name-p subpath prog-cache)
+                (push subpath path-queue)))))
+           ((file-regular-p path)
+            (push path files)))
+          (puthash path t paths-seen))))
+    files))
 
-(defun headlice--prog-file-regexps ()
-  "List all regexps that match a prog-derived mode in `auto-mode-alist'."
-  (cl-loop
-   for mode in auto-mode-alist
-   when (symbolp (cdr mode))
-   when (provided-mode-derived-p (cdr mode) 'prog-mode)
-   collect (car mode)))
+(defun headlice--prog-file-name-p (file &optional cache)
+  "Return whether FILE matches a prog-derived mode from `auto-mode-alist'.
+If querying many files in the same project, this can often be sped up
+by providing a CACHE list, which should be initialised as list of nil."
+  (or (and (car cache)
+           (string-match-p (caar cache) file)
+           (cdar cache))
+      (and (cadr cache)
+           (let ((cache-slice cache)
+                 matched-mode)
+             (while cache-slice
+               (if (string-match-p (caadr cache-slice) file)
+                   (let ((match (cadr cache-slice)))
+                     (setcdr cache-slice (cddr cache-slice))
+                     (setq cache (cons match cache)
+                           cache-slice nil
+                           matched-mode (cdr match)))
+                 (setq cache-slice
+                       (if (caddr cache-slice)
+                           (cdr cache-slice)
+                         (setcdr cache-slice nil)))))
+             matched-mode))
+      (let ((mode-list auto-mode-alist))
+        (while (consp mode-list)
+          (if (headlice--file-is-prog-mode-p file (cdar mode-list) (caar mode-list))
+              (let ((cache-copy (cons (car cache) (cdr cache))))
+                (setcar cache (car mode-list))
+                (setcdr cache cache-copy)
+                (setq mode-list (caar mode-list)))
+            (setq mode-list (cdr mode-list))))
+        mode-list)))
+
+(defun headlice--file-is-prog-mode-p (file mode regexp)
+  "Return MODE if FILE matches REGEXP and MODE is a decedent of `prog-mode'.
+A riff on `provided-mode-derived-p'."
+  (when (symbolp mode)
+    (when (and (autoloadp (symbol-function mode))
+               (string-match-p regexp file))
+      (autoload-do-load (symbol-function mode)))
+    (while (and mode (not (eq mode 'prog-mode)))
+      (setq mode (get mode 'derived-mode-parent))))
+  (and (eq mode 'prog-mode) (string-match-p regexp file) mode))
 
 ;;; Fuzzy license matching
 
