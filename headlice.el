@@ -630,7 +630,7 @@ Returns t when `headlice-auto-insert' has been run, nil otherwise."
         (cdar (push (cons "authors" authors) (cdr license))))))
 
 ;;;###autoload
-(defun headlice-create-license (&optional explicit-choice)
+(defun headlice-create-license (&optional dir license-kind)
   "Create a license for the current project.
 If called while in an empty file of name `headlice-preferred-filename', license
 content is inserted into the current buffer. Otherwise, a file with the name
@@ -638,11 +638,21 @@ content is inserted into the current buffer. Otherwise, a file with the name
 
 When set, a `headlice-preferred-license' license will be used.
 
-With \\[universal-argument] prefix EXPLICIT-CHOICE, ask for the license kind
+With \\[universal-argument] prefix, ask for the license kind
 regardless of `headlice-preferred-license'.
-With \\[universal-argument] \\[universal-argument] prefix EXPLICIT-CHOICE, ask
-for the target directory regardless of the detected project root."
-  (interactive "P")
+With \\[universal-argument] \\[universal-argument] prefix, ask
+for the target directory as well regardless of the detected project root.
+
+When called non-interactively, DIR and LICENSE-KIND may be used to set where the
+license is created, and what kind of license is used."
+  (interactive
+   (list (or (and (or (not (consp current-prefix-arg))
+                      (< (car current-prefix-arg) 16))
+                  (headlice--project-root))
+             (read-directory-name "Project root: "))
+         (if current-prefix-arg
+             (headlice--pick-license)
+           headlice-preferred-license)))
   (let* ((license-buf
           (if (and buffer-file-name
                    (not buffer-read-only)
@@ -658,20 +668,12 @@ for the target directory regardless of the detected project root."
                             (null (buffer-base-buffer)))
                        (yes-or-no-p "Replace the current content? ")))
               (current-buffer)
-            (let ((filepath
-                   (expand-file-name
-                    headlice-preferred-filename
-                    (or (and (or (not (consp explicit-choice))
-                                 (< (car explicit-choice) 16))
-                             (headlice--project-root))
-                        (read-directory-name "Project root: ")))))
+            (let ((filepath (expand-file-name headlice-preferred-filename dir)))
               (and (or (not (file-exists-p filepath))
                        (yes-or-no-p (format "Replace existing %s? " filepath)))
                    (find-file-noselect filepath)))))
          (selected-license
-          (or (and (not explicit-choice)
-                   headlice-preferred-license)
-              (headlice--pick-license)))
+          (or license-kind headlice-preferred-license (headlice--pick-license)))
          (template-file
           (plist-get (cdr (assoc selected-license headlice-license-specs)) :template)))
     (if template-file
