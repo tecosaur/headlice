@@ -478,25 +478,28 @@ The following special forms an interpreted when INTERPRET-SPECIAL-P is non-nil:
   "Search for all placeholders in the current buffer, and fill them.
 If there is no entry in PLACEHOLDERS, `headlice-license-fields-autofills' will
 be used if possible, or the user explicitly prompted (starting with
-PROMPT-PREFIX)."
-  (let (extra-placeholders)
+PROMPT-PREFIX).
+
+Returns the values of all placeholders the user supplied, as an alist."
+  (let (filled-placeholders)
     (save-excursion
       (goto-char (point-min))
       (while (re-search-forward "{{\\([^\n]*?\\)}}" nil t)
         (let* ((placeholder (match-string 1))
                (replacement
                 (or (cdr (assoc placeholder placeholders))
-                    (cdr (assoc placeholder extra-placeholders))
+                    (cdr (assoc placeholder filled-placeholders))
                     (when-let ((auto (cdr (assoc placeholder headlice-license-fields-autofills))))
                       (cond
                        ((stringp auto) auto)
                        ((functionp auto)
                         (cdar (push (cons placeholder (save-match-data (funcall auto)))
-                                    extra-placeholders)))))
+                                    filled-placeholders)))))
                     (cdar (push (cons placeholder
                                       (read-string (format "%s%s: " (or prompt-prefix "") placeholder)))
-                                extra-placeholders)))))
-          (replace-match replacement))))))
+                                filled-placeholders)))))
+          (replace-match replacement))))
+    filled-placeholders))
 
 ;;;###autoload
 (defun headlice-auto-insert (&optional force)
@@ -662,8 +665,11 @@ for the target directory regardless of the detected project root."
     (if template-file
         (with-current-buffer license-buf
           (insert-file-contents template-file)
-          (headlice--fill-template nil (format "(%s) " selected-license))
-          (basic-save-buffer)
+          (let ((filled-specs (headlice--fill-template nil (format "(%s) " selected-license))))
+            (basic-save-buffer)
+            (puthash (file-name-directory buffer-file-name)
+                     (cons selected-license filled-specs)
+                     headlice--cache))
           (message "Created license file %s" (propertize (buffer-file-name) 'face 'font-lock-builtin-face)))
       (unless (eq (current-buffer) license-buf)
         (kill-buffer license-buf))
