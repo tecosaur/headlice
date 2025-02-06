@@ -209,8 +209,8 @@ Returns nil if no root project could be identified."
 (defun headlice--project-license (&optional dir)
   "Attempt to determine the license governing DIR.
 If a license could be identified, this result is cached."
-  (let* ((dir (or dir default-directory))
-         (root (or (headlice--project-root dir) dir)))
+  (let* ((dir (directory-file-name (or dir default-directory)))
+         (root (directory-file-name (or (headlice--project-root dir) dir))))
     (let (license)
       (while (and (not license)
                   (string-prefix-p root dir))
@@ -219,7 +219,7 @@ If a license could be identified, this result is cached."
           (setq license (headlice--project-license-1 dir))
           (when license (puthash dir license headlice--cache)))
         (unless license
-          (setq dir (file-name-directory (directory-file-name dir)))))
+          (setq dir (directory-file-name (file-name-directory dir)))))
       license)))
 
 (defun headlice--project-license-1 (dir)
