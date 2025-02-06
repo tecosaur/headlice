@@ -38,39 +38,50 @@
         (headers-dir (expand-file-name "headers" (file-name-directory load-file-name))))
     `((unlicense
        :template ,(file-name-concat licenses-dir "unlicense.txt")
+       :needle "this\\s-+is\\s-+free\\s-+and\\s-+unencumbered\\s-+software\\|unlicense\\.org"
        :spdx "Unlicense")
       (mit
        :template ,(file-name-concat licenses-dir "mit.txt")
+       :needle "mit license\\|permission\\s-+is\\s-+hereby\\s-+granted"
        :spdx "MIT")
       (bsd-2
        :template ,(file-name-concat licenses-dir "bsd-2.txt")
+       :needle "redistribution\\s-+and\\s-+use\\s-+in\\s-+source"
        :spdx "BSD-2-Clause")
       (bsd-3
        :template ,(file-name-concat licenses-dir "bsd-3.txt")
+       :needle "redistribution\\s-+and\\s-+use\\s-+in\\s-+source"
        :spdx "BSD-3-Clause")
       (apache
        :template ,(file-name-concat licenses-dir "apache-2.txt")
        :header ,(file-name-concat headers-dir "apache-2.txt")
+       :needle "apache license"
        :spdx "Apache-2.0")
       (eupl
        :template ,(file-name-concat licenses-dir "eupl-1.2_en.txt")
+       :needle "european\\s-+union\\s-+public\\s-+licence"
        :spdx "EUPL-1.2")
       (mpl
        :template ,(file-name-concat licenses-dir "mpl-2.txt")
        :header ,(file-name-concat headers-dir "mpl-2.txt")
+       :needle "mozilla\\s-+public\\s-+license"
        :spdx "MPL-2.0")
       (lgpl-3
        :template ,(file-name-concat licenses-dir "lgpl-3.txt")
+       :needle "gnu\\s-+lesser\\s-+general\\s-+public\\s-+license"
        :spdx "LGPL-2.0-or-later")
       (gpl-2
        :template ,(file-name-concat licenses-dir "gpl-2.txt")
+       :needle "gnu\\s-+general\\s-+public\\s-+license\\s-+version\\s-+2"
        :spdx "GPL-2-or-later")
       (gpl-3
        :template ,(file-name-concat licenses-dir "gpl-3.txt")
        :header ,(file-name-concat headers-dir "gpl-3.txt")
+       :needle "gnu\\s-+general\\s-+public\\s-+license\\s-+version\\s-+3"
        :spdx "GPL-3-or-later")
       (agpl-3
        :template ,(file-name-concat licenses-dir "agpl-3.txt")
+       :needle "gnu\\s-+affero\\s-+general\\s-+public\\s-+license\\s-+version\\s-+3"
        :spdx "AGPL-3.0-or-later")))
   "Template files for known licenses."
   :type '(alist :key-type symbol
@@ -208,16 +219,27 @@ If a license could be identified, this result is cached."
       (when (and (not license)
                  (file-exists-p (file-name-concat dir filename)))
         (dolist (license-spec headlice-license-specs)
-          (when-let (((not license))
-                     (template (plist-get (cdr license-spec) :template))
-                     (license-match
-                      (headlice--match-contents
-                       template
-                       (file-name-concat dir filename))))
-            (setq license (cons (car license-spec)
-                                (cdr license-match)))
-            ))))
+          (unless license
+            (let* ((spec (cdr license-spec))
+                   (template (plist-get spec :template))
+                   (needle (plist-get spec :needle))
+                   (filepath (file-name-concat dir filename))
+                   license-match)
+              (when (and template
+                         (or (not needle)
+                             (headlice--file-match-p needle filepath)))
+                (setq license-match (headlice--match-contents template filepath)))
+              (when license-match
+                (setq license (cons (car license-spec)
+                                    (cdr license-match)))))))))
     license))
+
+(defun headlice--file-match-p (regexp file)
+  "Check whether REGEXP occurs in FILE."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (and (re-search-forward regexp nil t) t)))
 
 (defun headlice--file-license (&optional file)
   "Get the license of FILE, defaulting to the current buffer's file."
