@@ -83,7 +83,17 @@
        :template ,(file-name-concat licenses-dir "agpl-3.txt")
        :needle "gnu\\s-+affero\\s-+general\\s-+public\\s-+license\\s-+version\\s-+3"
        :spdx "AGPL-3.0-or-later")))
-  "Template files for known licenses."
+  "Template files for known licenses.
+
+Each spec should be a cons cell of the form (NAME . SPEC),
+where the NAME is a symbol for the license and SPEC is a plist.
+
+The SPEC recognises these properties:
+- :template (mandatory), a path to a template license file
+- :spdx (mandatory), the SPDX license identifier
+- :header (optional), a path to a license header sample
+- :needle (optional but recommended), a short regexp that matches
+  part of the license but rules out most random documents"
   :type '(alist :key-type symbol
           :value-type
           (list (const :template) file
@@ -289,7 +299,7 @@ If a license could be identified, this result is cached."
       license)))
 
 (defun headlice--file-copyright (&optional file)
-  "TODO."
+  "Identify the copyright parameters relevant to FILE."
   (if file
       (if-let ((buf (get-file-buffer file)))
           (with-current-buffer buf
@@ -317,7 +327,7 @@ If a license could be identified, this result is cached."
               (cons "authors" authors))))))
 
 (defun headlice--comment-prefixes (mode)
-  "TODO."
+  "Identify the comment prefix appropriate for MODE."
   (or (alist-get mode headlice--mode-comment-prefixes)
       (cdar (push (with-temp-buffer
                     (funcall mode)
@@ -381,7 +391,8 @@ Largely copied from `set-auto-mode'."
 (defvar headlice--files-to-sample 10)
 
 (defun headlice--sample-dir-files (fn dir)
-  "TODO."
+  "Apply FN to a sample of the code files under DIR.
+Returns all unique return values of FN."
   (let* ((code-files (headlice--find-code-files dir))
          (nfiles (length code-files))
          results)
@@ -404,7 +415,7 @@ Largely copied from `set-auto-mode'."
     results))
 
 (defun headlice--project-authors (&optional dir)
-  "TODO."
+  "List the authors known to be responsible for the project under DIR."
   (or (cdr (assoc "authors" (cdr (headlice--project-license dir))))
       (let ((authors (headlice--sample-dir-files #'headlice--file-authors (or dir default-directory))))
         (and (= (length (delete-dups authors)))
@@ -559,7 +570,8 @@ With \\[universal-argument] \\[universal-argument] FORCE, insert at point."
           (insert "\n")))))))
 
 (defun headlice--insert-if-absent ()
-  "TODO."
+  "Call `headlice-auto-insert' if the current buffer has no file license.
+Returns t when `headlice-auto-insert' has been run, nil otherwise."
   (when-let (((headlice--suitable-buffer-p t))
              (license (headlice--project-license))
              ((not (headlice--file-license))))
@@ -762,7 +774,9 @@ A riff on `provided-mode-derived-p'."
 ;;; Fuzzy license matching
 
 (defun headlice--suitable-buffer-p (&optional allow-existing)
-  "Whether the current buffer is a suitable target for license insertion."
+  "Whether the current buffer is a suitable target for license insertion.
+When ALLOW-EXISTING is set, this will also match a buffer that represents an
+existing file."
   (and buffer-file-name
        (not buffer-read-only)
        (or allow-existing
