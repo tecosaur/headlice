@@ -92,13 +92,19 @@ The SPEC recognises these properties:
 - :template (mandatory), a path to a template license file
 - :spdx (mandatory), the SPDX license identifier
 - :header (optional), a path to a license header sample
-- :needle (optional but recommended), a short regexp that matches
-  part of the license but rules out most random documents"
+- :needle (optional but recommended), a short case-insensitive regexp that
+  matches part of the license but rules out most random documents.
+  The needle should also match the :header form, when applicable.
+  When unset, this defaults to \"copyright\"."
   :type '(alist :key-type symbol
           :value-type
           (list (const :template) file
                 (const :header) (choice (const nil :tag "No header") file)
                 (const :spdx) string)))
+
+(defcustom headlice-header-search-limit 2000
+  "Number of bytes searched at the start of a file for a license header."
+  :type 'natnum)
 
 (defcustom headlice-license-fields-autofills
   (cl-eval-when (load)
@@ -228,31 +234,31 @@ If a license could be identified, this result is cached."
     (dolist (filename headlice-license-filenames)
       (when (and (not license)
                  (file-exists-p (file-name-concat dir filename)))
-        (dolist (license-spec headlice-license-specs)
-          (unless license
-            (let* ((spec (cdr license-spec))
-                   (template (plist-get spec :template))
-                   (needle (plist-get spec :needle))
-                   (filepath (file-name-concat dir filename))
-                   license-match)
-              (when (and template
-                         (or (not needle)
-                             (headlice--file-match-p needle filepath)))
-                (setq license-match (headlice--match-contents template filepath)))
-              (when license-match
-                (setq license (cons (car license-spec)
-                                    (cdr license-match)))))))))
+        (with-temp-buffer
+          (insert-file-contents (file-name-concat dir filename))
+          (goto-char (point-min))
+          (let (buf-prepared-for-match)
+            (dolist (license-spec headlice-license-specs)
+              (unless license
+                (when-let ((template (plist-get (cdr license-spec) :template))
+                           (needle (or (plist-get (cdr license-spec) :needle)
+                                       "copyright"))
+                           (match (and (save-excursion
+                                         (re-search-forward needle nil t))
+                                       (or buf-prepared-for-match
+                                           (progn
+                                             (downcase-region (point-min) (point-max))
+                                             (goto-char (point-min))
+                                             (text-mode)
+                                             (setq buf-prepared-for-match t)))
+                                       (headlice--match-contents template (current-buffer)))))
+                  (setq license (cons (car license-spec)
+                                      (cdr match))))))))))
     license))
 
-(defun headlice--file-match-p (regexp file)
-  "Check whether REGEXP occurs in FILE."
-  (with-temp-buffer
-    (insert-file-contents file)
-    (goto-char (point-min))
-    (and (re-search-forward regexp nil t) t)))
-
-(defun headlice--file-license (&optional file)
-  "Get the license of FILE, defaulting to the current buffer's file."
+(defun headlice--file-license (&optional file mode-cache)
+  "Get the license of FILE, defaulting to the current buffer's file.
+If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
   (if file
       (if-let ((buf (if (equal file buffer-file-name)
                         (current-buffer)
@@ -260,20 +266,33 @@ If a license could be identified, this result is cached."
           (with-current-buffer buf
             (headlice--file-license))
         (with-temp-buffer
-          (insert-file-contents file)
-          (setq buffer-file-name file)
-          (let ((cstart (headlice--comment-prefixes (headlice--guess-mode))))
-            (setq comment-start (car cstart)
-                  comment-start-skip (cdr cstart)))
-          (prog1
-              (headlice--file-license)
-            (set-buffer-modified-p nil))))
+          (insert-file-contents file nil nil headlice-header-search-limit)
+          (goto-char (point-min))
+          (and (save-excursion
+                 (or (re-search-forward "copyright" nil t)
+                     (re-search-forward headlice--spdx-license-regexp nil t)))
+               (progn
+                 (setq buffer-file-name file)
+                 (let* ((mode (or (and (not (save-excursion
+                                              (re-search-forward "mode:" nil t)))
+                                       (headlice--prog-file-kind file mode-cache))
+                                  (headlice--guess-mode)
+                                  'text-mode))
+                        (cstart (headlice--comment-prefixes mode)))
+                   (setq comment-start (car cstart)
+                         comment-start-skip (cdr cstart)))
+                 (prog1 (headlice--file-license)
+                   (set-buffer-modified-p nil))))))
     (let (license)
       (save-excursion
         (goto-char (point-min))
         (dolist (license-spec headlice-license-specs)
           (when-let (((not license))
                      (header (plist-get (cdr license-spec) :header))
+                     (save-excursion
+                       (re-search-forward
+                        (or (plist-get (cdr license-spec) :needle) "copyright")
+                        nil t))
                      (license-match
                       (with-silent-modifications
                         (headlice--match-contents header (current-buffer)))))
@@ -404,12 +423,12 @@ Returns all unique return values of FN."
           (cl-loop
            for i in (append seq nil)
            while (< (length results) headlice--files-to-sample)
-           for result = (funcall fn (elt code-files i))
+           for result = (funcall fn (car (elt code-files i)))
            when result
            do (push result results))
           results)
       (dotimes (_ headlice--files-to-sample)
-        (push (funcall fn (elt code-files (random nfiles)))
+        (push (funcall fn (car (elt code-files (random nfiles))))
               results)))
     (setq results (delete-dups results))
     results))
@@ -513,14 +532,17 @@ Returns the values of all placeholders the user supplied, as an alist."
     filled-placeholders))
 
 ;;;###autoload
-(defun headlice-auto-insert (&optional force)
-  "Automatically insert a license header, as appropriate.
+(defun headlice-auto-insert (&optional license force)
+  "Automatically insert a header for LICENSE, as appropriate.
+When unset, LICENSE is guessed or interactively asked for.
+
 With FORCE, insert regardless of whether the buffer seems suitable.
 With \\[universal-argument] FORCE, ask for the license type if ambiguous.
 With \\[universal-argument] \\[universal-argument] FORCE, insert at point."
-  (interactive (list (or current-prefix-arg (list 1))))
+  (interactive (list nil (or current-prefix-arg (list 1))))
   (when-let (((or force (headlice--suitable-buffer-p)))
-             (license (or (headlice--project-license)
+             (license (or license
+                          (headlice--project-license)
                           (and (consp force)
                                (cons (or (and (> (car force) 1)
                                               headlice-preferred-license)
@@ -569,13 +591,32 @@ With \\[universal-argument] \\[universal-argument] FORCE, insert at point."
         (when headlice-blank-line-after-header
           (insert "\n")))))))
 
-(defun headlice--insert-if-absent ()
+(defun headlice--buffer-insert-if-absent ()
   "Call `headlice-auto-insert' if the current buffer has no file license.
 Returns t when `headlice-auto-insert' has been run, nil otherwise."
   (when-let (((headlice--suitable-buffer-p t))
              (license (headlice--project-license))
              ((not (headlice--file-license))))
-    (headlice-auto-insert 1)
+    (headlice-auto-insert license 1)
+    t))
+
+(defun headlice--file-insert-if-absent (file &optional mode-cache)
+  "Call `headlice-auto-insert' within FILE if it has no license header.
+Returns t when `headlice-auto-insert' has been run, nil otherwise.
+MODE-CACHE may be provided to speed up this operation when run repeatedly on
+similar files."
+  (when-let (((not (headlice--file-license file mode-cache)))
+             (license (headlice--project-license (file-name-directory file))))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (rename-buffer (file-name-nondirectory file))
+      (setq buffer-file-name file)
+      (let ((delay-mode-hooks t))
+        (normal-mode))
+      (comment-normalize-vars)
+      (headlice-auto-insert license 1)
+      (save-buffer)
+      (set-buffer-modified-p nil))
     t))
 
 ;;;###autoload
@@ -588,12 +629,13 @@ When called interactively, DIR is the current working directory and
 CREATE-LICENSE-P is set."
   (interactive (list nil t))
   (let* ((root (or dir (headlice--project-root)))
-         (license (headlice--project-license root)))
+         (license (headlice--project-license root))
+         (mode-cache (list nil)))
     (when (and (not license) create-license-p)
       (headlice-create-license root)
       (setq license (headlice--project-license root)))
     (if license
-        (let* ((files (headlice--find-code-files root))
+        (let* ((files (mapcar #'car (headlice--find-code-files root mode-cache)))
                (nfiles (length files))
                (nchecked 0)
                (ninserted 0))
@@ -601,19 +643,10 @@ CREATE-LICENSE-P is set."
             (message "Checking %s... [%s/%s]" file (cl-incf nchecked) nfiles)
             (if-let ((buf (get-file-buffer file)))
                 (with-current-buffer buf
-                  (when (headlice--insert-if-absent)
+                  (when (headlice--buffer-insert-if-absent)
                     (cl-incf ninserted)))
-              (with-temp-buffer
-                (insert-file-contents file)
-                (rename-buffer (file-name-nondirectory file))
-                (setq buffer-file-name file)
-                (let ((delay-mode-hooks t))
-                  (normal-mode))
-                (comment-normalize-vars)
-                (when (headlice--insert-if-absent)
-                  (cl-incf ninserted)
-                  (save-buffer))
-                (set-buffer-modified-p nil))))
+              (when (headlice--file-insert-if-absent file)
+                (cl-incf ninserted))))
           (message "Checked %s files, inserted %s headers" (length files) ninserted))
       (message "Cannot infest %s, as it is not under any known license" root))))
 
@@ -648,10 +681,8 @@ CREATE-LICENSE-P is set."
                  (propertize unlicensed-info 'face 'warning))
       (message "Unlicensed project"))))
 
-(defun headlice-project-status (&optional dir read-files-p)
-  "Collect information on the license of files under DIR.
-If READ-FILES-P is set, every file will be individually inspected to determine
-their license."
+(defun headlice-project-status (&optional dir)
+  "Collect information on the license of files under DIR."
   (let* ((root (file-truename (or dir default-directory)))
          project-license
          (authors-table (make-hash-table :test #'equal))
@@ -659,19 +690,20 @@ their license."
          (file-count 0)
          file-licenses
          last-dir-license
+         mode-cache (list nil)
          (scan-update 0.0)
          code-files)
     (with-temp-message (format "Scanning %s…" (directory-file-name root))
       (redisplay)
       (setq project-license (headlice--project-license root)
-            code-files (headlice--find-code-files dir))
+            code-files (headlice--find-code-files dir mode-cache))
       (dolist (code-file code-files)
         (cl-incf file-count)
         (when (> (- (float-time) scan-update) 0.2)
-          (message "[%s/%s] Scanning %s…" file-count (length code-files) code-file)
+          (message "[%s/%s] Scanning %s…" file-count (length code-files) (car code-file))
           (redisplay)
           (setq scan-update (float-time)))
-        (let* ((parent-dir (file-name-directory code-file))
+        (let* ((parent-dir (file-name-directory (car code-file)))
                (parent-license
                 (if (equal (car last-dir-license) parent-dir)
                     (cdr last-dir-license)
@@ -679,9 +711,8 @@ their license."
                    (setq last-dir-license
                          (cons parent-dir (headlice--project-license parent-dir))))))
                (license
-                (if read-files-p
-                    (headlice--file-license code-file)
-                  parent-license))
+                (or (headlice--file-license (car code-file) mode-cache)
+                    parent-license))
                (kind (car license))
                (authors (cdr (assoc "authors" (cdr license)))))
           (if kind
@@ -791,40 +822,45 @@ license is created, and what kind of license is used."
     (cdr (assoc (completing-read "License: " license-entries nil t)
                 license-entries))))
 
-(defun headlice--find-code-files (&optional dir)
-  "List all files under DIR that seem licensable."
+(defun headlice--find-code-files (&optional dir mode-cache)
+  "List all files under DIR that seem licensable.
+MODE-CACHE may be provided to speed up or record file mode identification."
   (let ((root (file-truename (expand-file-name (or dir default-directory))))
         (ignored-dirnames (append headlice-ignored-directories '("." "..")))
         path-queue
         (paths-seen (make-hash-table :test #'equal))
-        (prog-cache (list nil))
-        files)
-    (push (file-name-as-directory root) path-queue)
+        (prog-cache (or mode-cache (list nil)))
+        files kind)
+    (push (cons (file-name-as-directory root) 'directory) path-queue)
     (while path-queue
-      (let ((path (pop path-queue)))
+      (let* ((file (pop path-queue))
+             (path (car file)))
         (unless (gethash path paths-seen)
           (cond
-           ((not (file-readable-p path)))
-           ((file-symlink-p path)
+           ((or (not (cdr file)) ; Skip
+                (not (file-readable-p path))))
+           ((file-symlink-p path) ; Follow all symlinks exactly once
             (let ((realpath (file-truename path)))
               (when (and (not (gethash realpath paths-seen))
                          (string-prefix-p root realpath))
                 (push realpath path-queue))))
-           ((directory-name-p path)
+           ((directory-name-p path) ; Find code files under directory
             (dolist (subpath (directory-files path t))
               (cond
                ((member (file-name-base subpath) ignored-dirnames))
                ((file-directory-p subpath)
-                (push (file-name-as-directory subpath) path-queue))
-               ((headlice--prog-file-name-p subpath prog-cache)
-                (push subpath path-queue)))))
+                (push (cons (file-name-as-directory subpath) 'directory) path-queue))
+               ((setq kind (headlice--prog-file-kind subpath prog-cache))
+                (push (cons subpath kind) path-queue)))))
            ((file-regular-p path)
-            (push path files)))
+            (push file files)))
           (puthash path t paths-seen))))
     files))
 
-(defun headlice--prog-file-name-p (file &optional cache)
-  "Return whether FILE matches a prog-derived mode from `auto-mode-alist'.
+(defun headlice--prog-file-kind (file &optional cache)
+  "Return the `prog-mode' derived mode for FILE according to `auto-mode-alist'.
+Should FILE not match any `prog-mode'-derived entry, return nil.
+
 If querying many files in the same project, this can often be sped up
 by providing a CACHE list, which should be initialised as list of nil."
   (or (and (car cache)
@@ -847,12 +883,13 @@ by providing a CACHE list, which should be initialised as list of nil."
              matched-mode))
       (let ((mode-list auto-mode-alist))
         (while (consp mode-list)
-          (if (headlice--file-is-prog-mode-p file (cdar mode-list) (caar mode-list))
+          (when (headlice--file-is-prog-mode-p file (cdar mode-list) (caar mode-list))
+            (when cache
               (let ((cache-copy (cons (car cache) (cdr cache))))
                 (setcar cache (car mode-list))
-                (setcdr cache cache-copy)
-                (setq mode-list (caar mode-list)))
-            (setq mode-list (cdr mode-list))))
+                (setcdr cache cache-copy)))
+            (setq mode-list (car mode-list)))
+          (setq mode-list (cdr mode-list)))
         mode-list)))
 
 (defun headlice--file-is-prog-mode-p (file mode regexp)
@@ -864,7 +901,7 @@ A riff on `provided-mode-derived-p'."
       (autoload-do-load (symbol-function mode)))
     (while (and mode (not (eq mode 'prog-mode)))
       (setq mode (get mode 'derived-mode-parent))))
-  (and (eq mode 'prog-mode) (string-match-p regexp file) mode))
+  (and (eq mode 'prog-mode) (string-match-p regexp file) t))
 
 ;;; Fuzzy license matching
 
