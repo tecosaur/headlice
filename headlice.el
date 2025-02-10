@@ -186,6 +186,9 @@ See `headlice-license-specs' for a list of known license."
 
 (defvar headlice--mode-comment-prefixes nil)
 
+(defconst headlice--unrecognised-license 'unrecognised
+  "Symbol indicating the a license not known in `headlice-license-specs'.")
+
 ;;;; Minor mode:
 
 ;;;###autoload
@@ -230,10 +233,12 @@ If a license could be identified, this result is cached."
 
 (defun headlice--project-license-1 (dir)
   "Look for a license directly under DIR."
-  (let (license)
+  (let (license non-readme-licensefile)
     (dolist (filename headlice-license-filenames)
       (when (and (not license)
                  (file-exists-p (file-name-concat dir filename)))
+        (unless (string-match-p "readme" filename)
+          (setq non-readme-licensefile t))
         (with-temp-buffer
           (insert-file-contents (file-name-concat dir filename))
           (goto-char (point-min))
@@ -254,7 +259,9 @@ If a license could be identified, this result is cached."
                                        (headlice--match-contents template (current-buffer)))))
                   (setq license (cons (car license-spec)
                                       (cdr match))))))))))
-    license))
+    (or license
+        (and non-readme-licensefile
+             (cons headlice--unrecognised-license nil)))))
 
 (defun headlice--file-license (&optional file mode-cache)
   "Get the license of FILE, defaulting to the current buffer's file.
@@ -660,25 +667,55 @@ CREATE-LICENSE-P is set."
          (num-files (plist-get status :total-files))
          (num-unlicensed (plist-get status :unlicensed))
          (license-names
-          (string-join (mapcar #'symbol-name (mapcar #'car files)) "/"))
+          (mapconcat
+           (lambda (license)
+             (if (eq (car license) headlice--unrecognised-license)
+                 (propertize "Unrecognised" 'face 'warning)
+               (propertize (upcase (symbol-name (car license)))
+                           'face 'font-lock-keyword-face)))
+           files
+           "/"))
          (author-info
           (cond
            ((null authors)
             (propertize "unknown" 'face 'shadow))
-           ((<= 1 (length authors) 2)
-            (string-join authors " and "))
-           (t (format "%s authors" (length authors)))))
+           ((<= 1 (length authors) 4)
+            (let* ((rev-authors (reverse authors))
+                   (last-author (car rev-authors))
+                   (most-authors (nreverse (cdr rev-authors)))
+                   (n-authors (length authors))
+                   (max-len (/ 36 n-authors)))
+              (concat
+               (mapconcat
+                (lambda (author)
+                  (propertize (truncate-string-to-width author max-len nil nil t)
+                              'face 'font-lock-string-face))
+                most-authors
+                ", ")
+               (pcase n-authors
+                 (1 nil)
+                 (2 " and ")
+                 (_ ", and "))
+               (propertize (truncate-string-to-width last-author max-len nil nil t)
+                           'face 'font-lock-string-face))))
+           (t ; >4 authors
+            (propertize (format "%s and %s other authors"
+                                (car authors)
+                                (1- (length authors)))
+                        'face 'font-lock-string-face))))
          (unlicensed-info
           (if (> num-unlicensed 0)
-              (format " (%s unlicensed)" num-unlicensed)
+              (propertize (format " (%s unlicensed)" num-unlicensed) 'face 'error)
             "")))
     (if files
-        (message "%s licensed project by %s encompassing %s file%s%s"
-                 (propertize (upcase license-names) 'face 'font-lock-keyword-face)
-                 (propertize author-info 'face 'font-lock-string-face)
+        (message "%s is a %s licensed project by %s encompassing %s file%s%s"
+                 (propertize (file-name-nondirectory (directory-file-name (or dir default-directory)))
+                             'face 'font-lock-constant-face)
+                 license-names
+                 author-info
                  (propertize (number-to-string num-files) 'face 'font-lock-number-face)
                  (if (= num-files 1) "" "s")
-                 (propertize unlicensed-info 'face 'warning))
+                 unlicensed-info)
       (message "Unlicensed project"))))
 
 (defun headlice-project-status (&optional dir)
