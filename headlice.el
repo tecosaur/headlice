@@ -82,7 +82,11 @@
       (agpl-3
        :template ,(file-name-concat licenses-dir "agpl-3.txt")
        :needle "gnu\\s-+affero\\s-+general\\s-+public\\s-+license\\s-+version\\s-+3"
-       :spdx "AGPL-3.0-or-later")))
+       :spdx "AGPL-3.0-or-later")
+      (cc-by-sa
+       :template ,(file-name-concat licenses-dir "cc-by-sa-4.txt")
+       :needle "attribution-sharealike\\s-+4\\.0\\s-+international"
+       :spdx "CC-BY-SA-4.0")))
   "Template files for known licenses.
 
 Each spec should be a cons cell of the form (NAME . SPEC),
@@ -152,7 +156,7 @@ This can either be t/nil, or a list of licenses which SPDX should be used for."
 See `headlice-license-specs' for a list of known license."
   :type '(repeat symbol))
 
-(defcustom headlice-ignored-licenses nil
+(defcustom headlice-ignored-licenses '(cc-by-sa)
   "Unless `headlice-limit-licenses' is set, these licenses are ignored.
 See `headlice-license-specs' for a list of known license."
   :type '(repeat symbol))
