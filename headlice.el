@@ -83,9 +83,17 @@
        :template ,(file-name-concat licenses-dir "agpl-3.txt")
        :needle "gnu\\s-+affero\\s-+general\\s-+public\\s-+license\\s-+version\\s-+3"
        :spdx "AGPL-3.0-or-later")
+      (cc0
+       :template ,(file-name-concat licenses-dir "cc-zero.txt")
+       :needle "cc0\\s-+1\\.0"
+       :spdx "CC0-1.0")
+      (cc-by
+       :template ,(file-name-concat licenses-dir "cc-by-4.txt")
+       :needle "creative\\s-+commons\\s-+attribution\\s-+4\\.0\\s-+international"
+       :spdx "CC-BY-4.0")
       (cc-by-sa
        :template ,(file-name-concat licenses-dir "cc-by-sa-4.txt")
-       :needle "attribution-sharealike\\s-+4\\.0\\s-+international"
+       :needle "creative\\s-+commons\\s-+attribution-sharealike\\s-+4\\.0\\s-+international"
        :spdx "CC-BY-SA-4.0")))
   "Template files for known licenses.
 
@@ -156,8 +164,9 @@ This can either be t/nil, or a list of licenses which SPDX should be used for."
 See `headlice-license-specs' for a list of known license."
   :type '(repeat symbol))
 
-(defcustom headlice-ignored-licenses '(cc-by-sa)
+(defcustom headlice-ignored-licenses '(cc0 cc-by cc-by-sa)
   "Unless `headlice-limit-licenses' is set, these licenses are ignored.
+By default, licenses which are appropriate for documentation only are ignored.
 See `headlice-license-specs' for a list of known license."
   :type '(repeat symbol))
 
