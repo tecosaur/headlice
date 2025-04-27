@@ -642,7 +642,7 @@ similar files."
 ;;;###autoload
 (defun headlice-infest (&optional dir create-license-p)
   "Add license headers to all files in the current project (under DIR).
-When the CREATE-LICENSE-P argument is set, a license will be created before
+When the CREATE-LICENSE-P argument is set, a license file will be created before
 adding headers if the project is currently unlicensed.
 
 When called interactively, DIR is the current working directory and
@@ -652,7 +652,7 @@ CREATE-LICENSE-P is set."
          (license (headlice--project-license root))
          (mode-cache (list nil)))
     (when (and (not license) create-license-p)
-      (headlice-create-license root)
+      (headlice-create-licensefile root)
       (setq license (headlice--project-license root)))
     (if license
         (let* ((files (mapcar #'car (headlice--find-code-files root mode-cache)))
@@ -805,7 +805,7 @@ CREATE-LICENSE-P is set."
         (cdar (push (cons "authors" authors) (cdr license))))))
 
 ;;;###autoload
-(defun headlice-create-license (&optional dir license-kind)
+(defun headlice-create-licensefile (&optional dir license-kind)
   "Create a license for the current project.
 If called while in an empty file of name `headlice-preferred-filename', license
 content is inserted into the current buffer. Otherwise, a file with the name
