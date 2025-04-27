@@ -664,6 +664,7 @@ CREATE-LICENSE-P is set."
             (if-let ((buf (get-file-buffer file)))
                 (with-current-buffer buf
                   (when (headlice--buffer-insert-if-absent)
+                    (save-buffer)
                     (cl-incf ninserted)))
               (when (headlice--file-insert-if-absent file)
                 (cl-incf ninserted))))
