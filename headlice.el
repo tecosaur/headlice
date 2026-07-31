@@ -265,7 +265,6 @@ If a license could be identified, this result is cached."
                                          (re-search-forward needle nil t))
                                        (or buf-prepared-for-match
                                            (progn
-                                             (downcase-region (point-min) (point-max))
                                              (goto-char (point-min))
                                              (text-mode)
                                              (setq buf-prepared-for-match t)))
@@ -489,7 +488,7 @@ The following special forms an interpreted when INTERPRET-SPECIAL-P is non-nil:
                 (cl-incf words-count)))
              ((memq syntax '(1 2))
               (skip-syntax-forward (string (syntax-class-to-char syntax)))
-              (push (cons pos (buffer-substring-no-properties pos (point)))
+              (push (cons pos (downcase (buffer-substring-no-properties pos (point))))
                     words)
               (cl-incf words-count))
              (t
@@ -511,7 +510,6 @@ The following special forms an interpreted when INTERPRET-SPECIAL-P is non-nil:
         (with-syntax-table syntax
           (uncomment-region (point-min) (point-max)))
         (goto-char (point-min))
-        (downcase-region (point-min) (point-max))
         (with-syntax-table text-mode-syntax-table
           (setq words (headlice--get-words (current-buffer) interpret-special-p word-limit))))
       (kill-buffer tempbuf)
@@ -519,7 +517,6 @@ The following special forms an interpreted when INTERPRET-SPECIAL-P is non-nil:
    ((and (stringp source) (file-exists-p source))
     (with-temp-buffer
       (insert-file-contents source)
-      (downcase-region (point-min) (point-max))
       (goto-char (point-min))
       (text-mode)
       (headlice--get-words (current-buffer) interpret-special-p word-limit)))))
@@ -548,7 +545,7 @@ Returns the values of all placeholders the user supplied, as an alist."
                     (cdar (push (cons placeholder
                                       (read-string (format "%s%s: " (or prompt-prefix "") placeholder)))
                                 filled-placeholders)))))
-          (replace-match replacement))))
+          (replace-match replacement t))))
     filled-placeholders))
 
 ;;;###autoload
