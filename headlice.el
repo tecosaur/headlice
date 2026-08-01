@@ -850,6 +850,7 @@ license is created, and what kind of license is used."
           (plist-get (cdr (assoc selected-license headlice-license-specs)) :template)))
     (if template-file
         (with-current-buffer license-buf
+          (erase-buffer)
           (insert-file-contents template-file)
           (let ((filled-specs (headlice--fill-template nil (format "(%s) " selected-license))))
             (basic-save-buffer)
