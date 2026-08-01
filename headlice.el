@@ -38,62 +38,62 @@
         (headers-dir (expand-file-name "headers" (file-name-directory load-file-name))))
     `((unlicense
        :template ,(file-name-concat licenses-dir "unlicense.txt")
-       :needle "this\\s-+is\\s-+free\\s-+and\\s-+unencumbered\\s-+software\\|unlicense\\.org"
+       :needle (["free" "and" "unencumbered" "software"] ["unlicense" "org"])
        :spdx "Unlicense")
       (mit
        :template ,(file-name-concat licenses-dir "mit.txt")
-       :needle "mit license\\|permission\\s-+is\\s-+hereby\\s-+granted"
+       :needle (["mit" "license"] ["permission" "is" "hereby" "granted"])
        :spdx "MIT")
       (bsd-2
        :template ,(file-name-concat licenses-dir "bsd-2.txt")
-       :needle "redistribution\\s-+and\\s-+use\\s-+in\\s-+source"
+       :needle ["redistribution" "and" "use" "in" "source"]
        :spdx "BSD-2-Clause")
       (bsd-3
        :template ,(file-name-concat licenses-dir "bsd-3.txt")
-       :needle "redistribution\\s-+and\\s-+use\\s-+in\\s-+source"
+       :needle ["redistribution" "and" "use" "in" "source"]
        :spdx "BSD-3-Clause")
       (apache
        :template ,(file-name-concat licenses-dir "apache-2.txt")
        :header ,(file-name-concat headers-dir "apache-2.txt")
-       :needle "apache license"
+       :needle ["apache" "license"]
        :spdx "Apache-2.0")
       (eupl
        :template ,(file-name-concat licenses-dir "eupl-1.2_en.txt")
-       :needle "european\\s-+union\\s-+public\\s-+licence"
+       :needle ["european" "union" "public" "licence"]
        :spdx "EUPL-1.2")
       (mpl
        :template ,(file-name-concat licenses-dir "mpl-2.txt")
        :header ,(file-name-concat headers-dir "mpl-2.txt")
-       :needle "mozilla\\s-+public\\s-+license"
+       :needle ["mozilla" "public" "license"]
        :spdx "MPL-2.0")
       (lgpl-3
        :template ,(file-name-concat licenses-dir "lgpl-3.txt")
-       :needle "gnu\\s-+lesser\\s-+general\\s-+public\\s-+license"
+       :needle ["gnu" "lesser" "general" "public" "license"]
        :spdx "LGPL-2.0-or-later")
       (gpl-2
        :template ,(file-name-concat licenses-dir "gpl-2.txt")
-       :needle "gnu\\s-+general\\s-+public\\s-+license\\s-+version\\s-+2"
+       :needle ["gnu" "general" "public" "license" "version" "2"]
        :spdx "GPL-2-or-later")
       (gpl-3
        :template ,(file-name-concat licenses-dir "gpl-3.txt")
        :header ,(file-name-concat headers-dir "gpl-3.txt")
-       :needle "gnu\\s-+general\\s-+public\\s-+license\\s-+version\\s-+3"
+       :needle ["gnu" "general" "public" "license"]
        :spdx "GPL-3-or-later")
       (agpl-3
        :template ,(file-name-concat licenses-dir "agpl-3.txt")
-       :needle "gnu\\s-+affero\\s-+general\\s-+public\\s-+license\\s-+version\\s-+3"
+       :needle ["gnu" "affero" "general" "public" "license"]
        :spdx "AGPL-3.0-or-later")
       (cc0
        :template ,(file-name-concat licenses-dir "cc-zero.txt")
-       :needle "cc0\\s-+1\\.0"
+       :needle ["cc0" "1" "0"]
        :spdx "CC0-1.0")
       (cc-by
        :template ,(file-name-concat licenses-dir "cc-by-4.txt")
-       :needle "creative\\s-+commons\\s-+attribution\\s-+4\\.0\\s-+international"
+       :needle ["creative" "commons" "attribution" "4" "0" "international"]
        :spdx "CC-BY-4.0")
       (cc-by-sa
        :template ,(file-name-concat licenses-dir "cc-by-sa-4.txt")
-       :needle "creative\\s-+commons\\s-+attribution-sharealike\\s-+4\\.0\\s-+international"
+       :needle ["creative" "commons" "attribution" "sharealike" "4" "0" "international"]
        :spdx "CC-BY-SA-4.0")))
   "Template files for known licenses.
 
@@ -104,14 +104,19 @@ The SPEC recognises these properties:
 - :template (mandatory), a path to a template license file
 - :spdx (mandatory), the SPDX license identifier
 - :header (optional), a path to a license header sample
-- :needle (optional but recommended), a short case-insensitive regexp that
-  matches part of the license but rules out most random documents.
-  The needle should also match the :header form, when applicable.
-  When unset, this defaults to \"copyright\"."
+- :needle (optional but recommended), a distinctive sequence of words that
+  occurs in the license but rules out most random documents.  This is either
+  a vector of words, or a list of such vectors giving alternatives.
+  Each word is matched separately and in order, so that intervening
+  whitespace and comment prefixes are ignored.  Consequently a needle also
+  matches the :header form, when applicable.
+  When unset, this defaults to [\"copyright\"]."
   :type '(alist :key-type symbol
           :value-type
           (list (const :template) file
                 (const :header) (choice (const nil :tag "No header") file)
+                (const :needle) (choice (vector string)
+                                        (repeat (vector string)))
                 (const :spdx) string)))
 
 (defcustom headlice-header-search-limit 2000
@@ -219,6 +224,32 @@ See `headlice-license-specs' for a list of known license."
 (declare-function project-root "project")
 (declare-function projectile-project-root "projectile")
 
+(defun headlice--needle-match-p (needle)
+  "Whether NEEDLE occurs in the current buffer.
+NEEDLE is a vector of words, or a list of such vectors giving alternatives,
+as described in `headlice-license-specs'.  The words of a vector must occur
+consecutively, but may be separated by any non-word characters, so that
+line wrapping and comment prefixes are ignored."
+  (let ((case-fold-search t))
+    (save-excursion
+      (cl-loop
+       for words in (ensure-list (or needle ["copyright"]))
+       thereis (progn
+                 (goto-char (point-min))
+                 (cl-loop
+                  while (search-forward (aref words 0) nil t)
+                  thereis (save-excursion
+                            (cl-loop
+                             for i from 1 below (length words)
+                             always (progn
+                                      (skip-syntax-forward "^w")
+                                      (let ((start (point)))
+                                        (skip-syntax-forward "w")
+                                        (string-equal-ignore-case
+                                         (aref words i)
+                                         (buffer-substring-no-properties
+                                          start (point)))))))))))))
+
 (defun headlice--project-root (&optional dir)
   "Attempt to find the root project of DIR, defaulting to `default-directory'.
 Returns nil if no root project could be identified."
@@ -235,13 +266,15 @@ If a license could be identified, this result is cached."
          (root (directory-file-name (or (headlice--project-root dir) dir))))
     (let (license)
       (while (and (not license)
+                  dir
                   (string-prefix-p root dir))
         (setq license (gethash dir headlice--cache))
         (unless license
           (setq license (headlice--project-license-1 dir))
           (when license (puthash dir license headlice--cache)))
         (unless license
-          (setq dir (directory-file-name (file-name-directory dir)))))
+          (let ((parent (directory-file-name (file-name-directory dir))))
+            (setq dir (and (not (equal parent dir)) parent)))))
       license)))
 
 (defun headlice--project-license-1 (dir)
@@ -259,10 +292,8 @@ If a license could be identified, this result is cached."
             (dolist (license-spec headlice-license-specs)
               (unless license
                 (when-let ((template (plist-get (cdr license-spec) :template))
-                           (needle (or (plist-get (cdr license-spec) :needle)
-                                       "copyright"))
-                           (match (and (save-excursion
-                                         (re-search-forward needle nil t))
+                           (match (and (headlice--needle-match-p
+                                        (plist-get (cdr license-spec) :needle))
                                        (or buf-prepared-for-match
                                            (progn
                                              (goto-char (point-min))
@@ -308,10 +339,8 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
         (dolist (license-spec headlice-license-specs)
           (when-let (((not license))
                      (header (plist-get (cdr license-spec) :header))
-                     (save-excursion
-                       (re-search-forward
-                        (or (plist-get (cdr license-spec) :needle) "copyright")
-                        nil t))
+                     ((headlice--needle-match-p
+                       (plist-get (cdr license-spec) :needle)))
                      (license-match
                       (with-silent-modifications
                         (headlice--match-contents header (current-buffer)))))
@@ -332,7 +361,8 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
                          (authors (match-string-no-properties 2))
                          ((progn
                             (beginning-of-line)
-                            (re-search-forward comment-start-skip (match-beginning 0) t))))
+                            (and comment-start-skip
+                                 (re-search-forward comment-start-skip (match-beginning 0) t)))))
                 (setcdr license (list (cons "year" year) (cons "authors" authors))))))))
       license)))
 
@@ -346,7 +376,8 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
           (insert-file-contents file)
           (setq buffer-file-name file)
           (setq comment-start-skip
-                (cdr (headlice--comment-prefixes (headlice--guess-mode))))
+                (cdr (headlice--comment-prefixes
+                      (or (headlice--guess-mode) 'text-mode))))
           (prog1
               (headlice--file-copyright)
             (set-buffer-modified-p nil))))
@@ -360,7 +391,8 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
                  (is-comment
                   (progn
                     (beginning-of-line)
-                    (re-search-forward comment-start-skip (match-beginning 0) t))))
+                    (and comment-start-skip
+                         (re-search-forward comment-start-skip (match-beginning 0) t)))))
         (list (cons "year" year)
               (cons "authors" authors))))))
 
@@ -369,7 +401,7 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
   (or (alist-get mode headlice--mode-comment-prefixes)
       (cdar (push (with-temp-buffer
                     (funcall mode)
-                    (comment-normalize-vars)
+                    (comment-normalize-vars t)
                     (cons mode (cons comment-start comment-start-skip)))
                   headlice--mode-comment-prefixes))))
 
@@ -456,12 +488,13 @@ Returns all unique return values of FN."
   "List the authors known to be responsible for the project under DIR."
   (or (cdr (assoc "authors" (cdr (headlice--project-license dir))))
       (let ((authors (headlice--sample-dir-files #'headlice--file-authors (or dir default-directory))))
-        (and (= (length (delete-dups authors)))
+        (and (= (length (delete-dups authors)) 1)
              (car authors)))))
 
 (defun headlice--get-words (source &optional interpret-special-p word-limit)
   "Return a list of all words in SOURCE, up to WORD-LIMIT.
 SOURCE may be a buffer, or a file path.
+Words are downcased, and SOURCE itself left unmodified.
 The following special forms an interpreted when INTERPRET-SPECIAL-P is non-nil:
   {{placeholder}}
   ??optional content??"
@@ -483,7 +516,7 @@ The following special forms an interpreted when INTERPRET-SPECIAL-P is non-nil:
              ((and interpret-special-p
                    (eq (char-after) ??)
                    (re-search-forward "\\?\\?\\([^[^\n]*?\\)\\?\\?" nil t))
-              (dolist (word (split-string (match-string 1) "\\Sw" t))
+              (dolist (word (split-string (downcase (match-string 1)) "\\Sw" t))
                 (push (cons 'optional word) words)
                 (cl-incf words-count)))
              ((memq syntax '(1 2))
@@ -527,9 +560,14 @@ If there is no entry in PLACEHOLDERS, `headlice-license-fields-autofills' will
 be used if possible, or the user explicitly prompted (starting with
 PROMPT-PREFIX).
 
+Optional \"??text??\" segments are retained, with their markers removed.
+
 Returns the values of all placeholders the user supplied, as an alist."
   (let (filled-placeholders)
     (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward "\\?\\?\\([^?\n]*\\)\\?\\?" nil t)
+        (replace-match (match-string 1) t t))
       (goto-char (point-min))
       (while (re-search-forward "{{\\([^\n]*?\\)}}" nil t)
         (let* ((placeholder (match-string 1))
@@ -545,7 +583,7 @@ Returns the values of all placeholders the user supplied, as an alist."
                     (cdar (push (cons placeholder
                                       (read-string (format "%s%s: " (or prompt-prefix "") placeholder)))
                                 filled-placeholders)))))
-          (replace-match replacement t))))
+          (replace-match replacement t t))))
     filled-placeholders))
 
 ;;;###autoload
@@ -738,7 +776,7 @@ CREATE-LICENSE-P is set."
          (file-count 0)
          file-licenses
          last-dir-license
-         mode-cache (list nil)
+         (mode-cache (list nil))
          (scan-update 0.0)
          code-files)
     (with-temp-message (format "Scanning %s…" (directory-file-name root))
@@ -898,7 +936,7 @@ MODE-CACHE may be provided to speed up or record file mode identification."
             (let ((realpath (file-truename path)))
               (when (and (not (gethash realpath paths-seen))
                          (string-prefix-p root realpath))
-                (push realpath path-queue))))
+                (push (cons realpath (cdr file)) path-queue))))
            ((directory-name-p path) ; Find code files under directory
             (dolist (subpath (directory-files path t))
               (cond
@@ -922,20 +960,18 @@ by providing a CACHE list, which should be initialised as list of nil."
            (string-match-p (caar cache) file)
            (cdar cache))
       (and (cadr cache)
-           (let ((cache-slice cache)
-                 matched-mode)
+           (let ((cache-slice (cdr cache))
+                 matched-entry)
              (while cache-slice
-               (if (string-match-p (caadr cache-slice) file)
-                   (let ((match (cadr cache-slice)))
-                     (setcdr cache-slice (cddr cache-slice))
-                     (setq cache (cons match cache)
-                           cache-slice nil
-                           matched-mode (cdr match)))
-                 (setq cache-slice
-                       (if (caddr cache-slice)
-                           (cdr cache-slice)
-                         (setcdr cache-slice nil)))))
-             matched-mode))
+               (if (and (car cache-slice)
+                        (string-match-p (caar cache-slice) file))
+                   (setq matched-entry (car cache-slice)
+                         cache-slice nil)
+                 (setq cache-slice (cdr cache-slice))))
+             (when matched-entry
+               (setcdr cache (cons (car cache) (delq matched-entry (cdr cache))))
+               (setcar cache matched-entry)
+               (cdr matched-entry))))
       (let ((mode-list auto-mode-alist))
         (while (consp mode-list)
           (when (headlice--file-is-prog-mode-p file (cdar mode-list) (caar mode-list))
@@ -1037,8 +1073,10 @@ or nil if no match."
             match-cont)
         (cond
          ((eq (car this-ref) 'optional)
-          (setq ref-pos (1+ ref-pos)
-                ref-skipped (1+ ref-skipped)))
+          (if (equal (cdr this-ref) (cdr (elt seen-words-vec seen-pos)))
+              (cl-incf seen-pos)
+            (cl-incf ref-skipped))
+          (cl-incf ref-pos))
          ((eq (car this-ref) 'placeholder)
           (push (cons (cdr this-ref) (cons (car (elt seen-words-vec seen-pos)) nil))
                 placeholders)
@@ -1048,7 +1086,8 @@ or nil if no match."
             (cl-incf scan-ahead))
           (setq match-cont
                 (if (and (= scan-ahead 0)
-                         (symbolp (car (elt ref-words-vec (1+ ref-pos)))))
+                         (or (= (1+ ref-pos) ref-len)
+                             (symbolp (car (elt ref-words-vec (1+ ref-pos))))))
                     (1+ seen-pos)
                   (headlice--sequence-first-match
                    seen-words-vec
@@ -1059,7 +1098,12 @@ or nil if no match."
             (cl-incf placeholder-words (- match-cont seen-pos 1))
             (setq ref-pos (1+ ref-pos)
                   seen-pos match-cont)
-            (setcdr (cdar placeholders) (1- (car (elt seen-words-vec seen-pos))))))
+            (let* ((last (and (> seen-pos 0) (elt seen-words-vec (1- seen-pos))))
+                   (word-end (if last (+ (car last) (length (cdr last))) 0)))
+              (setcdr (cdar placeholders)
+                      (if (< seen-pos seen-len)
+                          (max word-end (1- (car (elt seen-words-vec seen-pos))))
+                        word-end)))))
          (t ; Early exit
           (setq seen-pos seen-len)))
         (unless (= seen-pos seen-len)
@@ -1067,6 +1111,7 @@ or nil if no match."
             (setq ref-pos (+ ref-pos nrun)
                   seen-pos (+ seen-pos nrun))))))
     (and (= ref-pos ref-len)
+         (> (- seen-len placeholder-words) 0)
          (cons (/ (float (- ref-pos ref-skipped))
                   (- seen-len placeholder-words))
                placeholders))))
@@ -1078,7 +1123,7 @@ Returns the match proportion and all identified placeholders, or nil."
         (seen-words-vec (vconcat (headlice--get-words test)))
         (seen-start -1)
         result)
-    (while (and (not result) seen-start)
+    (while (and (not result) seen-start (> (length ref-words-vec) 0))
       (setq seen-start (headlice--sequence-first-match seen-words-vec (list (elt ref-words-vec 0)) (1+ seen-start))
             result (headlice--match-contents-1 ref-words-vec seen-words-vec seen-start)))
     (and result
