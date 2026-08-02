@@ -563,7 +563,8 @@ PROMPT-PREFIX).
 Optional \"??text??\" segments are retained, with their markers removed.
 
 Returns the values of all placeholders the user supplied, as an alist."
-  (let (filled-placeholders)
+  (let ((autofills (headlice--add-email-to-author headlice-license-fields-autofills))
+        filled-placeholders)
     (save-excursion
       (goto-char (point-min))
       (while (re-search-forward "\\?\\?\\([^?\n]*\\)\\?\\?" nil t)
@@ -574,7 +575,7 @@ Returns the values of all placeholders the user supplied, as an alist."
                (replacement
                 (or (cdr (assoc placeholder placeholders))
                     (cdr (assoc placeholder filled-placeholders))
-                    (when-let ((auto (cdr (assoc placeholder headlice-license-fields-autofills))))
+                    (when-let ((auto (cdr (assoc placeholder autofills))))
                       (cond
                        ((stringp auto) auto)
                        ((functionp auto)
@@ -602,7 +603,8 @@ With \\[universal-argument] \\[universal-argument] FORCE, insert at point."
                                (cons (or (and (> (car force) 1)
                                               headlice-preferred-license)
                                          (headlice--pick-license))
-                                     headlice-license-fields-autofills))))
+                                     (headlice--add-email-to-author
+                                      headlice-license-fields-autofills)))))
              ((or force
                   (if headlice-limit-licenses
                       (memq (car license) headlice-limit-licenses)
@@ -673,6 +675,22 @@ similar files."
       (save-buffer)
       (set-buffer-modified-p nil))
     t))
+
+(defun headlice--add-email-to-author (placeholders)
+  "Return a PLACEHOLDERS alist with the email address added to the authors field."
+  (if (and headlice-user-email
+           (assoc "authors" placeholders))
+      (let ((placeholders-old placeholders)
+            placeholders-new)
+        (while placeholders-old
+          (if (equal (caar placeholders-old) "authors")
+              (push (cons "authors"
+                          (format "%s <%s>" (cdar placeholders-old) headlice-user-email))
+                    placeholders-new)
+            (push (car placeholders-old) placeholders-new))
+          (setq placeholders-old (cdr placeholders-old)))
+        (nreverse placeholders-new))
+    placeholders))
 
 ;;;###autoload
 (defun headlice-infest (&optional dir create-license-p)
