@@ -163,6 +163,12 @@ This can either be t/nil, a list of licenses which SPDX should be used for, or
   "Whether to (re)state the copyright holder in headers."
   :type 'boolean)
 
+(defcustom headlice-preamble-regexps
+  '("#!" ".*-\\*-.*-\\*-" "[ \t\f]*#.*coding[:=]" "<\\?\\(?:xml\\|php\\)")
+  "Regexps matching leading lines that must stay above a license header.
+Each is matched at the start of a line."
+  :type '(repeat regexp))
+
 (defcustom headlice-blank-line-after-header t
   "Whether to insert a blank line after a license header."
   :type 'boolean)
@@ -592,6 +598,7 @@ Returns the value of every placeholder filled, as an alist."
 (defun headlice-auto-insert (&optional license force)
   "Automatically insert a header for LICENSE, as appropriate.
 When unset, LICENSE is guessed or interactively asked for.
+The header goes after any leading lines matching `headlice-preamble-regexps'.
 
 With FORCE, insert regardless of whether the buffer seems suitable.
 With \\[universal-argument], prefer `headlice-preferred-license' to asking.
@@ -612,7 +619,12 @@ Returns non-nil when a header is inserted."
                     (not (memq (car license) headlice-ignored-licenses)))))
              (spec (alist-get (car license) headlice-license-specs)))
     (unless (and (consp force) (> (car force) 4))
-      (goto-char (point-min)))
+      (goto-char (point-min))
+      (while (and (not (eobp))
+                  (cl-some #'looking-at-p headlice-preamble-regexps))
+        (forward-line 1))
+      (unless (bolp)
+        (insert "\n")))
     (cond
      ((and (plist-get spec :spdx)
            (pcase headlice-use-spdx-headers
