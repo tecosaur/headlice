@@ -205,7 +205,16 @@ See `headlice-license-specs' for a list of known license."
 (defvar headlice--cache (make-hash-table :test 'equal)
   "Cache of detected licenses. Maps project roots to cached results.")
 
-(defvar headlice--mode-comment-prefixes nil)
+(defconst headlice--comment-variables
+  '(uncomment-region-function comment-start comment-add comment-end
+    comment-padding comment-continue comment-end-skip comment-multi-line
+    comment-start-skip comment-use-syntax comment-quote-nested
+    comment-inline-offset)
+  "Buffer-local variables that determine how comments are recognised.")
+
+(defvar headlice--mode-comment-syntaxes nil
+  "Alist of (MODE SYNTAX-TABLE . BINDINGS) for each major mode probed so far.
+BINDINGS is an alist giving MODE's values of `headlice--comment-variables'.")
 
 (defconst headlice--unrecognised-license 'unrecognised
   "Symbol indicating the a license not known in `headlice-license-specs'.")
@@ -290,21 +299,14 @@ If a license could be identified, this result is cached."
           (setq non-readme-licensefile t))
         (with-temp-buffer
           (insert-file-contents (file-name-concat dir filename))
-          (goto-char (point-min))
-          (let (buf-prepared-for-match)
-            (dolist (license-spec headlice-license-specs)
-              (unless license
-                (when-let* ((template (plist-get (cdr license-spec) :template))
-                           (match (and (headlice--needle-match-p
-                                        (plist-get (cdr license-spec) :needle))
-                                       (or buf-prepared-for-match
-                                           (progn
-                                             (goto-char (point-min))
-                                             (text-mode)
-                                             (setq buf-prepared-for-match t)))
-                                       (headlice--match-contents template (current-buffer)))))
-                  (setq license (cons (car license-spec)
-                                      (cdr match))))))))))
+          (dolist (license-spec headlice-license-specs)
+            (unless license
+              (when-let* ((template (plist-get (cdr license-spec) :template))
+                          ((headlice--needle-match-p
+                            (plist-get (cdr license-spec) :needle)))
+                          (match (headlice--match-contents template (current-buffer))))
+                (setq license (cons (car license-spec)
+                                    (cdr match)))))))))
     (or license
         (and non-readme-licensefile
              (cons headlice--unrecognised-license nil)))))
@@ -320,22 +322,14 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
             (headlice--file-license))
         (with-temp-buffer
           (insert-file-contents file nil nil headlice-header-search-limit)
-          (goto-char (point-min))
-          (and (save-excursion
-                 (or (re-search-forward "copyright" nil t)
-                     (re-search-forward headlice--spdx-license-regexp nil t)))
-               (progn
-                 (setq buffer-file-name file)
-                 (let* ((mode (or (and (not (save-excursion
-                                              (re-search-forward "mode:" nil t)))
-                                       (headlice--prog-file-kind file mode-cache))
-                                  (headlice--guess-mode)
-                                  'text-mode))
-                        (cstart (headlice--comment-prefixes mode)))
-                   (setq comment-start (car cstart)
-                         comment-start-skip (cdr cstart)))
-                 (prog1 (headlice--file-license)
-                   (set-buffer-modified-p nil))))))
+          (setq buffer-file-name file)
+          (headlice--set-comment-syntax
+           (or (and (not (save-excursion (re-search-forward "mode:" nil t)))
+                    (headlice--prog-file-kind file mode-cache))
+               (headlice--guess-mode)
+               'text-mode))
+          (prog1 (headlice--file-license)
+            (set-buffer-modified-p nil))))
     (let (license)
       (save-excursion
         (goto-char (point-min))
@@ -345,8 +339,7 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
                      ((headlice--needle-match-p
                        (plist-get (cdr license-spec) :needle)))
                      (license-match
-                      (with-silent-modifications
-                        (headlice--match-contents header (current-buffer)))))
+                      (headlice--match-contents header (current-buffer))))
             (setq license (cons (car license-spec)
                                 (cdr license-match)))))
         (unless license
@@ -376,11 +369,9 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
           (with-current-buffer buf
             (headlice--file-copyright))
         (with-temp-buffer
-          (insert-file-contents file)
+          (insert-file-contents file nil nil headlice-header-search-limit)
           (setq buffer-file-name file)
-          (setq comment-start-skip
-                (cdr (headlice--comment-prefixes
-                      (or (headlice--guess-mode) 'text-mode))))
+          (headlice--set-comment-syntax (or (headlice--guess-mode) 'text-mode))
           (prog1
               (headlice--file-copyright)
             (set-buffer-modified-p nil))))
@@ -399,14 +390,21 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
         (list (cons "year" year)
               (cons "authors" authors))))))
 
-(defun headlice--comment-prefixes (mode)
-  "Identify the comment prefix appropriate for MODE."
-  (or (alist-get mode headlice--mode-comment-prefixes)
-      (cdar (push (with-temp-buffer
-                    (funcall mode)
-                    (comment-normalize-vars t)
-                    (cons mode (cons comment-start comment-start-skip)))
-                  headlice--mode-comment-prefixes))))
+(defun headlice--set-comment-syntax (mode)
+  "Make the current buffer recognise comments as MODE does, without running it."
+  (let ((syntax
+         (or (alist-get mode headlice--mode-comment-syntaxes)
+             (cdar (push (with-temp-buffer
+                           (delay-mode-hooks (funcall mode))
+                           (comment-normalize-vars t)
+                           (cons mode
+                                 (cons (syntax-table)
+                                       (mapcar (lambda (var) (cons var (symbol-value var)))
+                                               headlice--comment-variables))))
+                         headlice--mode-comment-syntaxes)))))
+    (set-syntax-table (car syntax))
+    (pcase-dolist (`(,var . ,value) (cdr syntax))
+      (set (make-local-variable var) value))))
 
 (defun headlice--guess-mode ()
   "Guess the appropriate major mode for the current file.
@@ -494,70 +492,56 @@ Returns all unique return values of FN."
         (and (= (length (delete-dups authors)) 1)
              (car authors)))))
 
-(defun headlice--get-words (source &optional interpret-special-p word-limit)
-  "Return a list of all words in SOURCE, up to WORD-LIMIT.
-SOURCE may be a buffer, or a file path.
-Words are downcased, and SOURCE itself left unmodified.
-The following special forms an interpreted when INTERPRET-SPECIAL-P is non-nil:
-  {{placeholder}}
-  ??optional content??"
-  (cond
-   ((and (bufferp source)
-         (eq (syntax-table) text-mode-syntax-table))
-    (let ((pos (point))
-          (words-count 0)
-          (word-limit (or word-limit most-positive-fixnum))
-          words)
-      (save-excursion
-        (while (and (not (eobp)) (< words-count word-limit))
-          (let ((syntax (syntax-class (syntax-after (point)))))
-            (cond
-             ;; Anchored, so a stray "{" or "?" is read as ordinary text
-             ;; instead of consuming everything up to a distant special form.
-             ((and interpret-special-p (looking-at "{{\\([^\n]*?\\)}}"))
-              (push (cons 'placeholder (match-string 1)) words)
-              (goto-char (match-end 0)))
-             ((and interpret-special-p (looking-at "\\?\\?\\([^?\n]*?\\)\\?\\?"))
-              ;; Move first: `split-string' clobbers the match data.
-              (let ((contents (match-string 1)))
-                (goto-char (match-end 0))
-                (dolist (word (split-string (downcase contents) "\\Sw" t))
-                  (push (cons 'optional word) words)
-                  (cl-incf words-count))))
-             ((memq syntax '(1 2))
-              (skip-syntax-forward (string (syntax-class-to-char syntax)))
-              (push (cons pos (downcase (buffer-substring-no-properties pos (point))))
-                    words)
-              (cl-incf words-count))
-             (t
-              (skip-syntax-forward (string (syntax-class-to-char syntax)))))
-            (setq pos (point)))))
-      (nreverse words)))
-   ((bufferp source)
-    (let ((tempbuf (generate-new-buffer " *headlice-wordification*"))
-          (syntax (with-current-buffer source (syntax-table)))
-          words)
-      (with-current-buffer tempbuf
-        (insert-buffer-substring source)
-        (dolist (var '(major-mode uncomment-region-function comment-start
-                       comment-add comment-end comment-padding comment-continue
-                       comment-end-skip comment-multi-line comment-start-skip
-                       comment-use-syntax comment-quote-nested
-                       comment-inline-offset))
-          (set (make-local-variable var) (buffer-local-value var source)))
-        (with-syntax-table syntax
-          (uncomment-region (point-min) (point-max)))
-        (goto-char (point-min))
-        (with-syntax-table text-mode-syntax-table
-          (setq words (headlice--get-words (current-buffer) interpret-special-p word-limit))))
-      (kill-buffer tempbuf)
-      words))
-   ((and (stringp source) (file-exists-p source))
-    (with-temp-buffer
-      (insert-file-contents source)
-      (goto-char (point-min))
-      (text-mode)
-      (headlice--get-words (current-buffer) interpret-special-p word-limit)))))
+(defun headlice--call-as-plain-text (source fn)
+  "Call FN in an uncommented copy of SOURCE, a buffer or file path.
+The copy uses `text-mode-syntax-table', with point at its start.
+Returns FN's value."
+  (with-temp-buffer
+    (if (stringp source)
+        (insert-file-contents source)
+      (insert-buffer-substring source)
+      (dolist (var headlice--comment-variables)
+        (set (make-local-variable var) (buffer-local-value var source)))
+      (when comment-start
+        (with-syntax-table (with-current-buffer source (syntax-table))
+          (uncomment-region (point-min) (point-max)))))
+    (set-syntax-table text-mode-syntax-table)
+    (goto-char (point-min))
+    (funcall fn)))
+
+(defun headlice--get-words (&optional interpret-special-p)
+  "Return a list of all words in the current buffer after point.
+Each word is a cons cell (POSITION . WORD), with WORD downcased.  The buffer
+should use `text-mode-syntax-table'.
+
+When INTERPRET-SPECIAL-P is non-nil, these special forms are recognised:
+  {{name}}      giving (placeholder . NAME)
+  ??content??   giving (optional . WORD) for each word of CONTENT"
+  (let ((pos (point))
+        words)
+    (save-excursion
+      (while (not (eobp))
+        (let ((syntax (syntax-class (syntax-after (point)))))
+          (cond
+           ;; Anchored, so a stray "{" or "?" is read as ordinary text
+           ;; instead of consuming everything up to a distant special form.
+           ((and interpret-special-p (looking-at "{{\\([^\n]*?\\)}}"))
+            (push (cons 'placeholder (match-string 1)) words)
+            (goto-char (match-end 0)))
+           ((and interpret-special-p (looking-at "\\?\\?\\([^?\n]*?\\)\\?\\?"))
+            ;; Move first: `split-string' clobbers the match data.
+            (let ((contents (match-string 1)))
+              (goto-char (match-end 0))
+              (dolist (word (split-string (downcase contents) "\\Sw" t))
+                (push (cons 'optional word) words))))
+           ((memq syntax '(1 2))
+            (skip-syntax-forward (string (syntax-class-to-char syntax)))
+            (push (cons pos (downcase (buffer-substring-no-properties pos (point))))
+                  words))
+           (t
+            (skip-syntax-forward (string (syntax-class-to-char syntax)))))
+          (setq pos (point)))))
+    (nreverse words)))
 
 (defun headlice--autofill-values ()
   "Return `headlice-license-fields-autofills' with all values as strings."
@@ -1136,38 +1120,35 @@ or nil if no match."
 
 (defun headlice--match-contents (reference test)
   "Match TEST against REFERENCE.
-Returns the match proportion and all identified placeholders, or nil."
-  (let ((ref-words-vec (vconcat (headlice--get-words reference t)))
-        (seen-words-vec (vconcat (headlice--get-words test)))
-        (seen-start -1)
-        result)
-    (while (and (not result) seen-start (> (length ref-words-vec) 0))
-      (setq seen-start (headlice--sequence-first-match seen-words-vec (list (elt ref-words-vec 0)) (1+ seen-start))
-            result (headlice--match-contents-1 ref-words-vec seen-words-vec seen-start)))
-    (and result
-         (cons (car result)
-               (headlice--extract-placeholder-values (cdr result) test)))))
+REFERENCE and TEST are each a buffer or a file path, and comments in TEST are
+disregarded.  Returns (PROPORTION . PLACEHOLDERS), where PLACEHOLDERS is an
+alist of each placeholder in REFERENCE to its text in TEST, or nil when TEST
+does not contain REFERENCE."
+  (let ((ref-words-vec
+         (vconcat (headlice--call-as-plain-text
+                   reference (lambda () (headlice--get-words t))))))
+    (headlice--call-as-plain-text
+     test
+     (lambda ()
+       (let ((seen-words-vec (vconcat (headlice--get-words)))
+             (seen-start -1)
+             result)
+         (while (and (not result) seen-start (> (length ref-words-vec) 0))
+           (setq seen-start (headlice--sequence-first-match seen-words-vec (list (elt ref-words-vec 0)) (1+ seen-start))
+                 result (headlice--match-contents-1 ref-words-vec seen-words-vec seen-start)))
+         (and result
+              (cons (car result)
+                    (headlice--extract-placeholder-values (cdr result)))))))))
 
-(defun headlice--extract-placeholder-values (placeholder-positions &optional source)
-  "Extract placeholders according to PLACEHOLDER-POSITIONS.
-If SOURCE is nil, the placeholders are extracted from the current buffer.
-A different buffer or file path can also be provided as SOURCE."
-  (cond
-   ((null source)
-    (let (placeholders)
-      (dolist (name-position placeholder-positions)
-        (push (cons (car name-position)
-                    (string-trim
-                     (buffer-substring (cadr name-position) (cddr name-position))))
-              placeholders))
-      (nreverse placeholders)))
-   ((bufferp source)
-    (with-current-buffer source
-      (headlice--extract-placeholder-values placeholder-positions)))
-   ((and (stringp source) (file-exists-p source))
-    (with-temp-buffer
-      (insert-file-contents source)
-      (headlice--extract-placeholder-values placeholder-positions)))))
+(defun headlice--extract-placeholder-values (placeholder-positions)
+  "Extract placeholders at PLACEHOLDER-POSITIONS in the current buffer.
+PLACEHOLDER-POSITIONS is a list of (NAME START . END).
+Returns an alist of (NAME . VALUE)."
+  (let (placeholders)
+    (pcase-dolist (`(,name ,start . ,end) placeholder-positions)
+      (push (cons name (string-trim (buffer-substring-no-properties start end)))
+            placeholders))
+    (nreverse placeholders)))
 
 (defun headlice-clear-cache ()
   "Clear the project license cache."
