@@ -203,10 +203,10 @@ See `headlice-license-specs' for a list of known license."
 (defconst headlice--copyright-regexp
   ;; The ©/(C) sigil is optional (Apache omits it), so the year must lead with a
   ;; digit to keep prose like "copyright holder" from matching.
-  "[Cc]opyright:?\\s *\\(?:\\(?:©\\|([Cc])\\)\\s *\\)?\\([0-9][0-9-, ]*\\)\\s *\\([^\n]+\\)")
+  "[Cc]opyright:?\\s *\\(?:\\(?:©\\|([Cc])\\)\\s *\\)?\\([0-9]+\\(?:[-, ]+[0-9]+\\)*\\)\\s *\\([^\n]+\\)")
 
 (defconst headlice--spdx-text-regexp
-  "SPDX-FileCopyrightText:\\s *©? *\\([0-9-, ]+\\)\\s *\\([^\n]+\\)")
+  "SPDX-FileCopyrightText:\\s *©? *\\([0-9]+\\(?:[-, ]+[0-9]+\\)*\\)\\s *\\([^\n]+\\)")
 
 (defconst headlice--spdx-license-regexp
   "SPDX-License-Identifier: \\([^ \t\n]+\\)")
@@ -224,6 +224,12 @@ See `headlice-license-specs' for a list of known license."
 (defvar headlice--mode-comment-syntaxes nil
   "Alist of (MODE SYNTAX-TABLE . BINDINGS) for each major mode probed so far.
 BINDINGS is an alist giving MODE's values of `headlice--comment-variables'.")
+
+(defconst headlice--placeholder-word-regexps
+  '(("year" . "\\`[0-9,]+\\'"))
+  "Regexps matching each word of a placeholder's value.
+These delimit a placeholder followed directly by another, such as the year
+in \"{{year}} {{authors}}\".")
 
 (defconst headlice--unrecognised-license 'unrecognised
   "Symbol indicating the a license not known in `headlice-license-specs'.")
@@ -258,7 +264,7 @@ line wrapping and comment prefixes are ignored."
        thereis (progn
                  (goto-char (point-min))
                  (cl-loop
-                  while (search-forward (aref words 0) nil t)
+                  while (re-search-forward (concat "\\<" (regexp-quote (aref words 0)) "\\>") nil t)
                   thereis (save-excursion
                             (cl-loop
                              for i from 1 below (length words)
@@ -360,15 +366,7 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
                 (when (equal license-spdx (plist-get (cdr spec) :spdx))
                   (setq license (cons (car spec) nil)))))
             (when license
-              (goto-char (point-min))
-              (when-let* (((re-search-forward headlice--spdx-text-regexp nil t))
-                         (year (match-string-no-properties 1))
-                         (authors (match-string-no-properties 2))
-                         ((progn
-                            (beginning-of-line)
-                            (and comment-start-skip
-                                 (re-search-forward comment-start-skip (match-beginning 0) t)))))
-                (setcdr license (list (cons "year" year) (cons "authors" authors))))))))
+              (setcdr license (headlice--file-copyright))))))
       license)))
 
 (defun headlice--file-copyright (&optional file)
@@ -386,6 +384,7 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
             (set-buffer-modified-p nil))))
     (save-excursion
       (goto-char (point-min))
+      (comment-normalize-vars t)
       (when-let* ((match (or
                          (re-search-forward headlice--spdx-text-regexp nil t)
                          (re-search-forward headlice--copyright-regexp nil t)))
@@ -397,7 +396,9 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
                     (and comment-start-skip
                          (re-search-forward comment-start-skip (match-beginning 0) t)))))
         (list (cons "year" year)
-              (cons "authors" authors))))))
+              (cons "authors" (if comment-end-skip
+                                  (string-trim-right authors comment-end-skip)
+                                authors)))))))
 
 (defun headlice--set-comment-syntax (mode)
   "Make the current buffer recognise comments as MODE does, without running it."
@@ -1098,7 +1099,8 @@ or nil if no match."
             (cl-incf ref-skipped))
           (cl-incf ref-pos))
          ((eq (car this-ref) 'placeholder)
-          (push (cons (cdr this-ref) (cons (car (elt seen-words-vec seen-pos)) nil))
+          (push (cons (cdr this-ref)
+                      (cons (and (> ref-pos 0) (car (elt seen-words-vec seen-pos))) nil))
                 placeholders)
           (while (and (< scan-ahead headlice--match-placeholder-scan-ahead)
                       (< (+ ref-pos scan-ahead 1) ref-len)
@@ -1108,7 +1110,13 @@ or nil if no match."
                 (if (and (= scan-ahead 0)
                          (or (= (1+ ref-pos) ref-len)
                              (symbolp (car (elt ref-words-vec (1+ ref-pos))))))
-                    (1+ seen-pos)
+                    (let ((word-regexp (cdr (assoc (cdr this-ref) headlice--placeholder-word-regexps)))
+                          (end (1+ seen-pos)))
+                      (while (and word-regexp
+                                  (< end seen-len)
+                                  (string-match-p word-regexp (cdr (elt seen-words-vec end))))
+                        (cl-incf end))
+                      end)
                   (headlice--sequence-first-match
                    seen-words-vec
                    (cl-subseq ref-words-vec (1+ ref-pos) (+ ref-pos 1 scan-ahead))
@@ -1121,9 +1129,13 @@ or nil if no match."
             (let* ((last (and (> seen-pos 0) (elt seen-words-vec (1- seen-pos))))
                    (word-end (if last (+ (car last) (length (cdr last))) 0)))
               (setcdr (cdar placeholders)
-                      (if (< seen-pos seen-len)
-                          (max word-end (1- (car (elt seen-words-vec seen-pos))))
-                        word-end)))))
+                      (cond
+                       ((and (= ref-pos ref-len)
+                             (not (assoc (cdr this-ref) headlice--placeholder-word-regexps)))
+                        nil)
+                       ((< seen-pos seen-len)
+                        (max word-end (1- (car (elt seen-words-vec seen-pos)))))
+                       (t word-end))))))
          (t ; Early exit
           (setq seen-pos seen-len)))
         (unless (= seen-pos seen-len)
@@ -1160,12 +1172,25 @@ does not contain REFERENCE."
 
 (defun headlice--extract-placeholder-values (placeholder-positions)
   "Extract placeholders at PLACEHOLDER-POSITIONS in the current buffer.
-PLACEHOLDER-POSITIONS is a list of (NAME START . END).
+PLACEHOLDER-POSITIONS is a list of (NAME START . END), where a nil START or
+END extends that side to the line boundary.  Unfilled template text, like
+\"<year>\", is omitted.
 Returns an alist of (NAME . VALUE)."
   (let (placeholders)
     (pcase-dolist (`(,name ,start . ,end) placeholder-positions)
-      (push (cons name (string-trim (buffer-substring-no-properties start end)))
-            placeholders))
+      (let* ((end (or end (save-excursion (goto-char start) (line-end-position))))
+             (start (save-excursion
+                      (if start
+                          (progn (goto-char start)
+                                 (skip-chars-backward "^[:space:]"))
+                        (goto-char end)
+                        (skip-chars-backward "[:space:]")
+                        (beginning-of-line))
+                      (point)))
+             (value (string-trim (buffer-substring-no-properties start end)
+                                 "[ \t\n]+" "[ \t\n,]+")))
+        (unless (string-match-p "\\`\\(?:<[^>]*>\\|\\[[^]]*]\\)\\'" value)
+          (push (cons name value) placeholders))))
     (nreverse placeholders)))
 
 (defun headlice-clear-cache ()
