@@ -9,7 +9,7 @@
 ;; Version: 0.1.0
 ;; Keywords: convenience docs files tools
 ;; Homepage: https://code.tecosaur.net/tec/headlice
-;; Package-Requires: ((emacs "28.1"))
+;; Package-Requires: ((emacs "29.1"))
 ;;
 ;; This file is not part of GNU Emacs.
 ;;
@@ -290,7 +290,7 @@ If a license could be identified, this result is cached."
           (let (buf-prepared-for-match)
             (dolist (license-spec headlice-license-specs)
               (unless license
-                (when-let ((template (plist-get (cdr license-spec) :template))
+                (when-let* ((template (plist-get (cdr license-spec) :template))
                            (match (and (headlice--needle-match-p
                                         (plist-get (cdr license-spec) :needle))
                                        (or buf-prepared-for-match
@@ -309,7 +309,7 @@ If a license could be identified, this result is cached."
   "Get the license of FILE, defaulting to the current buffer's file.
 If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
   (if file
-      (if-let ((buf (if (equal file buffer-file-name)
+      (if-let* ((buf (if (equal file buffer-file-name)
                         (current-buffer)
                       (get-file-buffer file))))
           (with-current-buffer buf
@@ -336,7 +336,7 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
       (save-excursion
         (goto-char (point-min))
         (dolist (license-spec headlice-license-specs)
-          (when-let (((not license))
+          (when-let* (((not license))
                      (header (plist-get (cdr license-spec) :header))
                      ((headlice--needle-match-p
                        (plist-get (cdr license-spec) :needle)))
@@ -346,7 +346,7 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
             (setq license (cons (car license-spec)
                                 (cdr license-match)))))
         (unless license
-          (when-let ((license-spdx
+          (when-let* ((license-spdx
                       (and (re-search-forward headlice--spdx-license-regexp nil t)
                            (match-string-no-properties 1))))
             (dolist (spec headlice-license-specs)
@@ -355,7 +355,7 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
                   (setq license (cons (car spec) nil)))))
             (when license
               (goto-char (point-min))
-              (when-let (((re-search-forward headlice--spdx-text-regexp nil t))
+              (when-let* (((re-search-forward headlice--spdx-text-regexp nil t))
                          (year (match-string-no-properties 1))
                          (authors (match-string-no-properties 2))
                          ((progn
@@ -368,7 +368,7 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
 (defun headlice--file-copyright (&optional file)
   "Identify the copyright parameters relevant to FILE."
   (if file
-      (if-let ((buf (get-file-buffer file)))
+      (if-let* ((buf (get-file-buffer file)))
           (with-current-buffer buf
             (headlice--file-copyright))
         (with-temp-buffer
@@ -382,7 +382,7 @@ If MODE-CACHE is provided, it may speed up the guessing of FILE's mode."
             (set-buffer-modified-p nil))))
     (save-excursion
       (goto-char (point-min))
-      (when-let ((match (or
+      (when-let* ((match (or
                          (re-search-forward headlice--spdx-text-regexp nil t)
                          (re-search-forward headlice--copyright-regexp nil t)))
                  (year (match-string-no-properties 1))
@@ -478,7 +478,7 @@ Returns all unique return values of FN."
            do (push result results))
           results)
       (dotimes (_ headlice--files-to-sample)
-        (when-let ((result (funcall fn (car (elt code-files (random nfiles))))))
+        (when-let* ((result (funcall fn (car (elt code-files (random nfiles))))))
           (push result results))))
     (setq results (delete-dups results))
     results))
@@ -576,7 +576,7 @@ Returns the values of all placeholders the user supplied, as an alist."
                (replacement
                 (or (cdr (assoc placeholder placeholders))
                     (cdr (assoc placeholder filled-placeholders))
-                    (when-let ((auto (cdr (assoc placeholder autofills))))
+                    (when-let* ((auto (cdr (assoc placeholder autofills))))
                       (cond
                        ((stringp auto) auto)
                        ((functionp auto)
@@ -597,7 +597,7 @@ With FORCE, insert regardless of whether the buffer seems suitable.
 With \\[universal-argument] FORCE, ask for the license type if ambiguous.
 With \\[universal-argument] \\[universal-argument] FORCE, insert at point."
   (interactive (list nil (or current-prefix-arg (list 1))))
-  (when-let (((or force (headlice--suitable-buffer-p)))
+  (when-let* (((or force (headlice--suitable-buffer-p)))
              (license (or license
                           (headlice--project-license)
                           (and (consp force)
@@ -652,7 +652,7 @@ With \\[universal-argument] \\[universal-argument] FORCE, insert at point."
 (defun headlice--buffer-insert-if-absent ()
   "Call `headlice-auto-insert' if the current buffer has no file license.
 Returns t when `headlice-auto-insert' has been run, nil otherwise."
-  (when-let (((headlice--suitable-buffer-p t))
+  (when-let* (((headlice--suitable-buffer-p t))
              (license (headlice--project-license))
              ((not (headlice--file-license))))
     (headlice-auto-insert license 1)
@@ -663,7 +663,7 @@ Returns t when `headlice-auto-insert' has been run, nil otherwise."
 Returns t when `headlice-auto-insert' has been run, nil otherwise.
 MODE-CACHE may be provided to speed up this operation when run repeatedly on
 similar files."
-  (when-let (((not (headlice--file-license file mode-cache)))
+  (when-let* (((not (headlice--file-license file mode-cache)))
              (license (headlice--project-license (file-name-directory file))))
     (with-temp-buffer
       (insert-file-contents file)
@@ -714,7 +714,7 @@ CREATE-LICENSE-P is set."
                (ninserted 0))
           (dolist (file files)
             (message "Checking %s... [%s/%s]" file (cl-incf nchecked) nfiles)
-            (if-let ((buf (get-file-buffer file)))
+            (if-let* ((buf (get-file-buffer file)))
                 (with-current-buffer buf
                   (when (headlice--buffer-insert-if-absent)
                     (save-buffer)
@@ -824,7 +824,7 @@ With \\[universal-argument] prefix, ask for the directory to report on."
                (kind (car license))
                (authors (cdr (assoc "authors" (cdr license)))))
           (if kind
-              (if-let ((count (assoc kind file-licenses)))
+              (if-let* ((count (assoc kind file-licenses)))
                   (cl-incf (cdr count))
                 (push (cons kind 1) file-licenses))
             (cl-incf unlicensed-count))
