@@ -150,11 +150,14 @@ appended, unless it already gives an email."
   "The license kind that's preferred when creating new projects."
   :type '(choice symbol (const nil)))
 
-(defcustom headlice-use-spdx-headers nil
-  "Whether SPDX headers should be used.
-This can either be t/nil, or a list of licenses which SPDX should be used for."
-  :type '(choice (const :tag "Always" t) (const :tag "Never" nil)
-          (repeat symbol)))
+(defcustom headlice-use-spdx-headers 'fallback
+  "Whether SPDX headers should be used in place of a license's header template.
+This can either be t/nil, a list of licenses which SPDX should be used for, or
+`fallback' to use SPDX only for licenses without a :header template."
+  :type '(choice (const :tag "Always" t)
+                 (const :tag "Without a header template" fallback)
+                 (const :tag "Never" nil)
+                 (repeat symbol)))
 
 (defcustom headlice-state-copyright-holder t
   "Whether to (re)state the copyright holder in headers."
@@ -591,8 +594,9 @@ Returns the value of every placeholder filled, as an alist."
 When unset, LICENSE is guessed or interactively asked for.
 
 With FORCE, insert regardless of whether the buffer seems suitable.
-With \\[universal-argument] FORCE, ask for the license type if ambiguous.
-With \\[universal-argument] \\[universal-argument] FORCE, insert at point."
+With \\[universal-argument], prefer `headlice-preferred-license' to asking.
+With \\[universal-argument] \\[universal-argument], insert at point.
+Returns non-nil when a header is inserted."
   (interactive (list nil (or current-prefix-arg (list 1))))
   (when-let* (((or force (headlice--suitable-buffer-p)))
              (license (or license
@@ -610,10 +614,11 @@ With \\[universal-argument] \\[universal-argument] FORCE, insert at point."
     (unless (and (consp force) (> (car force) 4))
       (goto-char (point-min)))
     (cond
-     ((and (or (eq headlice-use-spdx-headers t)
-               (and (consp headlice-use-spdx-headers)
-                    (memq (car license) headlice-use-spdx-headers)))
-           (plist-get spec :spdx))
+     ((and (plist-get spec :spdx)
+           (pcase headlice-use-spdx-headers
+             ('fallback (not (plist-get spec :header)))
+             ((pred consp) (memq (car license) headlice-use-spdx-headers))
+             (setting setting)))
       (let ((insert-start (point)))
         (when headlice-state-copyright-holder
           (insert "SPDX-FileCopyrightText: © "
@@ -624,7 +629,8 @@ With \\[universal-argument] \\[universal-argument] FORCE, insert at point."
         (insert "SPDX-License-Identifier: " (plist-get spec :spdx) "\n")
         (comment-region insert-start (point))
         (when headlice-blank-line-after-header
-          (insert "\n"))))
+          (insert "\n"))
+        t))
      ((plist-get spec :header)
       (let ((insert-start (point))
             (target-buffer (current-buffer))
@@ -643,20 +649,20 @@ With \\[universal-argument] \\[universal-argument] FORCE, insert at point."
           (insert-into-buffer target-buffer))
         (comment-region insert-start (point))
         (when headlice-blank-line-after-header
-          (insert "\n")))))))
+          (insert "\n"))
+        t)))))
 
 (defun headlice--buffer-insert-if-absent ()
   "Call `headlice-auto-insert' if the current buffer has no file license.
-Returns t when `headlice-auto-insert' has been run, nil otherwise."
+Returns non-nil when a header has been inserted."
   (when-let* (((headlice--suitable-buffer-p t))
              (license (headlice--project-license))
              ((not (headlice--file-license))))
-    (headlice-auto-insert license 1)
-    t))
+    (headlice-auto-insert license 1)))
 
 (defun headlice--file-insert-if-absent (file &optional mode-cache)
   "Call `headlice-auto-insert' within FILE if it has no license header.
-Returns t when `headlice-auto-insert' has been run, nil otherwise.
+Returns non-nil when a header has been inserted.
 MODE-CACHE may be provided to speed up this operation when run repeatedly on
 similar files."
   (when-let* (((not (headlice--file-license file mode-cache)))
@@ -668,9 +674,9 @@ similar files."
       (let ((delay-mode-hooks t))
         (normal-mode))
       (comment-normalize-vars)
-      (headlice-auto-insert license 1)
-      (save-buffer))
-    t))
+      (when (headlice-auto-insert license 1)
+        (save-buffer)
+        t))))
 
 ;;;###autoload
 (defun headlice-infest (&optional dir create-license-p)
