@@ -653,7 +653,10 @@ Returns non-nil when a header is inserted."
             (comment-empty-lines t))
         (with-temp-buffer
           (insert-file-contents (plist-get spec :header))
-          (headlice--fill-template (cdr license))
+          ;; Keep new answers on the (cached) license, so each is asked once.
+          (pcase-dolist (`(,field . ,value) (headlice--fill-template (cdr license)))
+            (unless (assoc field (cdr license))
+              (push (cons field value) (cdr license))))
           (goto-char (point-min))
           (when (and headlice-state-copyright-holder
                      (not (re-search-forward headlice--copyright-regexp nil t)))
