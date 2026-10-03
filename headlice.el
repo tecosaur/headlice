@@ -24,6 +24,10 @@
 (eval-when-compile
   (require 'subr-x))
 
+(defconst headlice--data-directory
+  (file-name-directory (or load-file-name buffer-file-name))
+  "Directory holding the bundled license and header templates.")
+
 ;;;; Customisation variables:
 
 (defgroup headlice nil
@@ -34,8 +38,8 @@
   :prefix "headlice-")
 
 (defcustom headlice-license-specs
-  (let ((licenses-dir (expand-file-name "licenses" (file-name-directory load-file-name)))
-        (headers-dir (expand-file-name "headers" (file-name-directory load-file-name))))
+  (let ((licenses-dir (expand-file-name "licenses" headlice--data-directory))
+        (headers-dir (expand-file-name "headers" headlice--data-directory)))
     `((unlicense
        :template ,(file-name-concat licenses-dir "unlicense.txt")
        :needle (["free" "and" "unencumbered" "software"] ["unlicense" "org"])
@@ -112,22 +116,22 @@ The SPEC recognises these properties:
   matches the :header form, when applicable.
   When unset, this defaults to [\"copyright\"]."
   :type '(alist :key-type symbol
-          :value-type
-          (list (const :template) file
-                (const :header) (choice (const :tag "No header" nil) file)
-                (const :needle) (choice (vector string)
-                                        (repeat (vector string)))
-                (const :spdx) string)))
+          :value-type (plist :options ((:template file)
+                                       (:spdx string)
+                                       (:header file)
+                                       (:needle sexp)))))
 
 (defcustom headlice-header-search-limit 2000
   "Number of bytes searched at the start of a file for a license header."
   :type 'natnum)
 
 (defcustom headlice-license-fields-autofills
-  (cl-eval-when (load)
-    `(("year" . ,(format-time-string "%Y"))
-      ("authors" . ,user-full-name)))
-  "Fields that can be reliably guessed."
+  `(("year" . ,(format-time-string "%Y"))
+    ("authors" . ,user-full-name))
+  "Fields that can be reliably guessed.
+Each entry is (FIELD . VALUE), where VALUE is a string or a function of no
+arguments returning one.  An \"authors\" value has `headlice-user-email'
+appended, unless it already gives an email."
   :type '(alist :key-type string :value-type (choice string function)))
 
 (defcustom headlice-license-filenames
@@ -555,16 +559,29 @@ The following special forms an interpreted when INTERPRET-SPECIAL-P is non-nil:
       (text-mode)
       (headlice--get-words (current-buffer) interpret-special-p word-limit)))))
 
+(defun headlice--autofill-values ()
+  "Return `headlice-license-fields-autofills' with all values as strings."
+  (mapcar
+   (pcase-lambda (`(,field . ,value))
+     (let ((value (if (functionp value) (funcall value) value)))
+       (cons field
+             (if (and (equal field "authors")
+                      headlice-user-email
+                      (not (string-search "<" value)))
+                 (format "%s <%s>" value headlice-user-email)
+               value))))
+   headlice-license-fields-autofills))
+
 (defun headlice--fill-template (&optional placeholders prompt-prefix)
   "Search for all placeholders in the current buffer, and fill them.
-If there is no entry in PLACEHOLDERS, `headlice-license-fields-autofills' will
-be used if possible, or the user explicitly prompted (starting with
-PROMPT-PREFIX).
+Each placeholder takes its value from the PLACEHOLDERS alist, else
+`headlice-license-fields-autofills', else the user is prompted (starting
+with PROMPT-PREFIX).
 
 Optional \"??text??\" segments are retained, with their markers removed.
 
-Returns the values of all placeholders the user supplied, as an alist."
-  (let ((autofills (headlice--add-email-to-author headlice-license-fields-autofills))
+Returns the value of every placeholder filled, as an alist."
+  (let ((autofills (headlice--autofill-values))
         filled-placeholders)
     (save-excursion
       (goto-char (point-min))
@@ -574,16 +591,12 @@ Returns the values of all placeholders the user supplied, as an alist."
       (while (re-search-forward "{{\\([^\n]*?\\)}}" nil t)
         (let* ((placeholder (match-string 1))
                (replacement
-                (or (cdr (assoc placeholder placeholders))
-                    (cdr (assoc placeholder filled-placeholders))
-                    (when-let* ((auto (cdr (assoc placeholder autofills))))
-                      (cond
-                       ((stringp auto) auto)
-                       ((functionp auto)
-                        (cdar (push (cons placeholder (save-match-data (funcall auto)))
-                                    filled-placeholders)))))
+                (or (cdr (assoc placeholder filled-placeholders))
                     (cdar (push (cons placeholder
-                                      (read-string (format "%s%s: " (or prompt-prefix "") placeholder)))
+                                      (or (cdr (assoc placeholder placeholders))
+                                          (cdr (assoc placeholder autofills))
+                                          (save-match-data
+                                            (read-string (format "%s%s: " (or prompt-prefix "") placeholder)))))
                                 filled-placeholders)))))
           (replace-match replacement t t))))
     filled-placeholders))
@@ -604,8 +617,7 @@ With \\[universal-argument] \\[universal-argument] FORCE, insert at point."
                                (cons (or (and (> (car force) 1)
                                               headlice-preferred-license)
                                          (headlice--pick-license))
-                                     (headlice--add-email-to-author
-                                      headlice-license-fields-autofills)))))
+                                     (headlice--autofill-values)))))
              ((or force
                   (if headlice-limit-licenses
                       (memq (car license) headlice-limit-licenses)
@@ -675,22 +687,6 @@ similar files."
       (headlice-auto-insert license 1)
       (save-buffer))
     t))
-
-(defun headlice--add-email-to-author (placeholders)
-  "Return a PLACEHOLDERS alist with the email address added to the authors field."
-  (if (and headlice-user-email
-           (assoc "authors" placeholders))
-      (let ((placeholders-old placeholders)
-            placeholders-new)
-        (while placeholders-old
-          (if (equal (caar placeholders-old) "authors")
-              (push (cons "authors"
-                          (format "%s <%s>" (cdar placeholders-old) headlice-user-email))
-                    placeholders-new)
-            (push (car placeholders-old) placeholders-new))
-          (setq placeholders-old (cdr placeholders-old)))
-        (nreverse placeholders-new))
-    placeholders))
 
 ;;;###autoload
 (defun headlice-infest (&optional dir create-license-p)
@@ -846,7 +842,9 @@ With \\[universal-argument] prefix, ask for the directory to report on."
                  (cdr license))))))
 
 (defun headlice--get-authors (license &optional dir)
-  "Get or set the author in LICENSE, optionally searching in DIR."
+  "Get or set the authors in LICENSE.
+When LICENSE gives none, they are guessed from the files of the project under
+DIR, or else asked for, starting from `headlice-license-fields-autofills'."
   (or (cdr (assoc "authors" (cdr license)))
       (let ((authors
              (or
@@ -854,11 +852,8 @@ With \\[universal-argument] prefix, ask for the directory to report on."
                            (let ((root (headlice--project-root dir)))
                              (and (not (equal root dir))
                                   (headlice--project-authors root)))))
-              (let ((name (read-string "Copyright holder: " user-full-name))
-                    (email (read-string "Contact email (recommended): " (or headlice-user-email ""))))
-                (if (string-empty-p email)
-                    name
-                  (format "%s <%s>" name email))))))
+              (read-string "Copyright holder: "
+                           (cdr (assoc "authors" (headlice--autofill-values)))))))
         (cdar (push (cons "authors" authors) (cdr license))))))
 
 ;;;###autoload
