@@ -16,4 +16,4 @@ hook, or enabling the global minor mode =headlice-mode=. To add headers to a
 project, ~headlice-infest~ will check all code files and insert missing headers.
 
 Headlice also helps streamline creation of the =LICENSE= file in new projects,
-just call ~headlice-create-license~.
+just call ~headlice-create-licensefile~.

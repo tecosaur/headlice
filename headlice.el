@@ -150,14 +150,12 @@ appended, unless it already gives an email."
   "The license kind that's preferred when creating new projects."
   :type '(choice symbol (const nil)))
 
-(defcustom headlice-use-spdx-headers 'fallback
+(defcustom headlice-use-spdx-headers nil
   "Whether SPDX headers should be used in place of a license's header template.
-This can either be t/nil, a list of licenses which SPDX should be used for, or
-`fallback' to use SPDX only for licenses without a :header template."
-  :type '(choice (const :tag "Always" t)
-                 (const :tag "Without a header template" fallback)
-                 (const :tag "Never" nil)
-                 (repeat symbol)))
+This can either be t/nil, or a list of licenses which SPDX should be used for.
+Licenses without a :header template always get SPDX headers."
+  :type '(choice (const :tag "Always" t) (const :tag "Never" nil)
+          (repeat symbol)))
 
 (defcustom headlice-state-copyright-holder t
   "Whether to (re)state the copyright holder in headers."
@@ -280,11 +278,11 @@ line wrapping and comment prefixes are ignored."
 (defun headlice--project-root (&optional dir)
   "Attempt to find the root project of DIR, defaulting to `default-directory'.
 Returns nil if no root project could be identified."
-  (or (and (featurep 'project)
-           (project-current nil dir)
-           (project-root (project-current nil dir)))
+  (or (when-let* (((featurep 'project))
+                  (project (project-current nil dir)))
+        (project-root project))
       (and (featurep 'projectile)
-           (projectile-project-root))))
+           (projectile-project-root dir))))
 
 (defun headlice--project-license (&optional dir)
   "Attempt to determine the license governing DIR.
@@ -312,19 +310,24 @@ If a license could be identified, this result is cached."
                  (file-exists-p (file-name-concat dir filename)))
         (unless (string-equal-ignore-case (file-name-base filename) "README")
           (setq non-readme-licensefile t))
-        (with-temp-buffer
-          (insert-file-contents (file-name-concat dir filename))
-          (dolist (license-spec headlice-license-specs)
-            (unless license
-              (when-let* ((template (plist-get (cdr license-spec) :template))
-                          ((headlice--needle-match-p
-                            (plist-get (cdr license-spec) :needle)))
-                          (match (headlice--match-contents template (current-buffer))))
-                (setq license (cons (car license-spec)
-                                    (cdr match)))))))))
+        (setq license (with-temp-buffer
+                        (insert-file-contents (file-name-concat dir filename))
+                        (headlice--buffer-license)))))
     (or license
         (and non-readme-licensefile
              (cons headlice--unrecognised-license nil)))))
+
+(defun headlice--buffer-license ()
+  "Identify the license whose template matches the current buffer.
+Returns (NAME . FIELDS), with FIELDS an alist of the template's placeholder
+values, or nil when no template matches."
+  (cl-some (lambda (license-spec)
+             (when-let* ((template (plist-get (cdr license-spec) :template))
+                         ((headlice--needle-match-p
+                           (plist-get (cdr license-spec) :needle)))
+                         (match (headlice--match-contents template (current-buffer))))
+               (cons (car license-spec) (cdr match))))
+           headlice-license-specs))
 
 (defun headlice--file-license (&optional file mode-cache)
   "Get the license of FILE, defaulting to the current buffer's file.
@@ -467,7 +470,7 @@ Largely copied from `set-auto-mode'."
 (defun headlice--file-authors (&optional file)
   "Attempt to identify the relevant authors of FILE."
   (cdr (or (assoc "authors" (headlice--file-copyright file))
-           (assoc "authors" (headlice--file-license file)))))
+           (assoc "authors" (cdr (headlice--file-license file))))))
 
 (defvar headlice--files-to-sample 10)
 
@@ -628,10 +631,10 @@ Returns non-nil when a header is inserted."
         (insert "\n")))
     (cond
      ((and (plist-get spec :spdx)
-           (pcase headlice-use-spdx-headers
-             ('fallback (not (plist-get spec :header)))
-             ((pred consp) (memq (car license) headlice-use-spdx-headers))
-             (setting setting)))
+           (or (not (plist-get spec :header))
+               (eq headlice-use-spdx-headers t)
+               (and (consp headlice-use-spdx-headers)
+                    (memq (car license) headlice-use-spdx-headers))))
       (let ((insert-start (point)))
         (when headlice-state-copyright-holder
           (insert "SPDX-FileCopyrightText: © "
@@ -675,6 +678,7 @@ Returns non-nil when a header has been inserted."
 
 (defun headlice--file-insert-if-absent (file &optional mode-cache)
   "Call `headlice-auto-insert' within FILE if it has no license header.
+FILE is rewritten directly, without running any save hooks.
 Returns non-nil when a header has been inserted.
 MODE-CACHE may be provided to speed up this operation when run repeatedly on
 similar files."
@@ -682,13 +686,12 @@ similar files."
              (license (headlice--project-license (file-name-directory file))))
     (with-temp-buffer
       (insert-file-contents file)
-      (rename-buffer (file-name-nondirectory file))
       (setq buffer-file-name file)
-      (let ((delay-mode-hooks t))
-        (normal-mode))
+      (delay-mode-hooks (normal-mode))
       (comment-normalize-vars)
       (when (headlice-auto-insert license 1)
-        (save-buffer)
+        (write-region nil nil file nil 'silent)
+        (set-buffer-modified-p nil)
         t))))
 
 ;;;###autoload
@@ -704,7 +707,7 @@ CREATE-LICENSE-P is set."
          (license (headlice--project-license root))
          (mode-cache (list nil)))
     (when (and (not license) create-license-p)
-      (headlice-create-licensefile root)
+      (headlice-create-licensefile root headlice-preferred-license)
       (setq license (headlice--project-license root)))
     (if license
         (let* ((files (mapcar #'car (headlice--find-code-files root mode-cache)))
@@ -718,7 +721,7 @@ CREATE-LICENSE-P is set."
                   (when (headlice--buffer-insert-if-absent)
                     (save-buffer)
                     (cl-incf ninserted)))
-              (when (headlice--file-insert-if-absent file)
+              (when (headlice--file-insert-if-absent file mode-cache)
                 (cl-incf ninserted))))
           (message "Checked %s files, inserted %s headers" (length files) ninserted))
       (message "Cannot infest %s, as it is not under any known license" root))))
@@ -866,66 +869,77 @@ If called while in an empty file of name `headlice-preferred-filename', license
 content is inserted into the current buffer. Otherwise, a file with the name
 `headlice-preferred-filename' is created in `headlice--project-root'.
 
-When set, a `headlice-preferred-license' license will be used.
+Replacing an existing license is confirmed first.  LICENSE-KIND is then
+asked for when nil; interactively, it is `headlice-preferred-license'.
 
 With \\[universal-argument] prefix, ask for the license kind
 regardless of `headlice-preferred-license'.
 With \\[universal-argument] \\[universal-argument] prefix, ask
-for the target directory as well regardless of the detected project root.
-
-When called non-interactively, DIR and LICENSE-KIND may be used to set where the
-license is created, and what kind of license is used."
+for the target directory as well regardless of the detected project root."
   (interactive
    (list (or (and (or (not (consp current-prefix-arg))
                       (< (car current-prefix-arg) 16))
                   (headlice--project-root))
              (read-directory-name "Project root: "))
-         (if current-prefix-arg
-             (headlice--pick-license)
+         (unless current-prefix-arg
            headlice-preferred-license)))
-  (let* ((license-buf
-          (if (and buffer-file-name
-                   (not buffer-read-only)
-                   (not (memq (aref (buffer-name) 0) '(?* ?\s)))
-                   (member (file-name-base buffer-file-name)
-                           (mapcar #'file-name-base
-                                   headlice-license-filenames))
-                   (member (file-name-extension buffer-file-name)
-                           '(nil "txt"))
-                   (or (and (bobp) (eobp)
-                            (not (file-exists-p buffer-file-name))
-                            (not (buffer-modified-p))
-                            (null (buffer-base-buffer)))
-                       (yes-or-no-p "Replace the current content? ")))
-              (current-buffer)
-            (let ((filepath (expand-file-name headlice-preferred-filename dir)))
-              (and (or (not (file-exists-p filepath))
-                       (yes-or-no-p (format "Replace existing %s? " filepath)))
-                   (find-file-noselect filepath)))))
-         (selected-license
-          (or license-kind headlice-preferred-license (headlice--pick-license)))
+  (let* ((license-buf (headlice--licensefile-buffer dir))
+         (selected-license (or license-kind (headlice--pick-license)))
          (template-file
-          (plist-get (cdr (assoc selected-license headlice-license-specs)) :template)))
-    (if template-file
-        (with-current-buffer license-buf
-          (erase-buffer)
-          (insert-file-contents template-file)
-          (let ((filled-specs (headlice--fill-template nil (format "(%s) " selected-license))))
-            (basic-save-buffer)
-            (let ((license-dir (file-name-directory buffer-file-name)))
-              (maphash
-               (lambda (file _)
-                 (when (string-prefix-p license-dir file)
-                   (remhash file headlice--cache)))
-               headlice--cache)
-              ;; Keyed as `headlice--project-license' looks it up, sans slash.
-              (puthash (directory-file-name license-dir)
-                       (cons selected-license filled-specs)
-                       headlice--cache)))
-          (message "Created license file %s" (propertize (buffer-file-name) 'face 'font-lock-builtin-face)))
-      (unless (eq (current-buffer) license-buf)
-        (kill-buffer license-buf))
-      (user-error "Could not create license, no template for `%s' could be located" selected-license))))
+          (or (plist-get (alist-get selected-license headlice-license-specs) :template)
+              (user-error "Could not create license, no template for `%s' could be located"
+                          selected-license))))
+    (with-current-buffer license-buf
+      (erase-buffer)
+      (insert-file-contents template-file)
+      (let ((filled-specs (headlice--fill-template nil (format "(%s) " selected-license))))
+        (basic-save-buffer)
+        (let ((license-dir (file-name-directory buffer-file-name)))
+          (maphash
+           (lambda (file _)
+             (when (string-prefix-p license-dir file)
+               (remhash file headlice--cache)))
+           headlice--cache)
+          ;; Keyed as `headlice--project-license' looks it up, sans slash.
+          (puthash (directory-file-name license-dir)
+                   (cons selected-license filled-specs)
+                   headlice--cache)))
+      (message "Created license file %s" (propertize (buffer-file-name) 'face 'font-lock-builtin-face)))))
+
+(defun headlice--licensefile-buffer (dir)
+  "Return the buffer a new license file should be written to.
+This is the current buffer when it visits a license file, or else the
+`headlice-preferred-filename' file under DIR.  Replacing an existing license
+is confirmed first, naming it, and declining is a `user-error'."
+  (let ((existing-license
+         (lambda ()
+           (if-let* ((license (headlice--buffer-license)))
+               (plist-get (alist-get (car license) headlice-license-specs) :spdx)
+             "unrecognised"))))
+    (if (and buffer-file-name
+             (not buffer-read-only)
+             (not (memq (aref (buffer-name) 0) '(?* ?\s)))
+             (member (file-name-base buffer-file-name)
+                     (mapcar #'file-name-base
+                             headlice-license-filenames))
+             (member (file-name-extension buffer-file-name)
+                     '(nil "txt"))
+             (or (and (bobp) (eobp)
+                      (not (file-exists-p buffer-file-name))
+                      (not (buffer-modified-p))
+                      (null (buffer-base-buffer)))
+                 (yes-or-no-p (format "Replace the %s license in this buffer? "
+                                      (funcall existing-license)))))
+        (current-buffer)
+      (let ((filepath (expand-file-name headlice-preferred-filename dir)))
+        (if (or (not (file-exists-p filepath))
+                (yes-or-no-p (format "Replace the %s license in %s? "
+                                     (with-temp-buffer
+                                       (insert-file-contents filepath)
+                                       (funcall existing-license))
+                                     filepath)))
+            (find-file-noselect filepath)
+          (user-error "Not creating a license, as %s already exists" filepath))))))
 
 (defun headlice--pick-license ()
   "Select a license name from `headlice-license-specs'."
@@ -1005,15 +1019,14 @@ by providing a CACHE list, which should be initialised as list of nil."
         mode-list)))
 
 (defun headlice--file-is-prog-mode-p (file mode regexp)
-  "Return MODE if FILE matches REGEXP and MODE is a decedent of `prog-mode'.
-A riff on `provided-mode-derived-p'."
-  (when (symbolp mode)
-    (when (and (autoloadp (symbol-function mode))
-               (string-match-p regexp file))
-      (autoload-do-load (symbol-function mode)))
-    (while (and mode (not (eq mode 'prog-mode)))
-      (setq mode (get mode 'derived-mode-parent))))
-  (and (eq mode 'prog-mode) (string-match-p regexp file) t))
+  "Return t if FILE matches REGEXP and MODE is a descendant of `prog-mode'."
+  (and (symbolp mode)
+       (string-match-p regexp file)
+       (progn
+         (when (autoloadp (indirect-function mode))
+           (autoload-do-load (indirect-function mode)))
+         (provided-mode-derived-p mode 'prog-mode))
+       t))
 
 ;;; Fuzzy license matching
 
