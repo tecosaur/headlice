@@ -27,7 +27,7 @@
 ;;;; Customisation variables:
 
 (defgroup headlice nil
-  "Diff in-place."
+  "Automatically handle license headers."
   :link '(url-link :tag "Homepage" "https://code.tecosaur.net/tec/headlice")
   :link '(emacs-library-link :tag "Library Source" "headlice.el")
   :group 'convenience
@@ -69,16 +69,16 @@
       (lgpl-3
        :template ,(file-name-concat licenses-dir "lgpl-3.txt")
        :needle ["gnu" "lesser" "general" "public" "license"]
-       :spdx "LGPL-2.0-or-later")
+       :spdx "LGPL-3.0-or-later")
       (gpl-2
        :template ,(file-name-concat licenses-dir "gpl-2.txt")
        :needle ["gnu" "general" "public" "license" "version" "2"]
-       :spdx "GPL-2-or-later")
+       :spdx "GPL-2.0-or-later")
       (gpl-3
        :template ,(file-name-concat licenses-dir "gpl-3.txt")
        :header ,(file-name-concat headers-dir "gpl-3.txt")
        :needle ["gnu" "general" "public" "license"]
-       :spdx "GPL-3-or-later")
+       :spdx "GPL-3.0-or-later")
       (agpl-3
        :template ,(file-name-concat licenses-dir "agpl-3.txt")
        :needle ["gnu" "affero" "general" "public" "license"]
@@ -114,7 +114,7 @@ The SPEC recognises these properties:
   :type '(alist :key-type symbol
           :value-type
           (list (const :template) file
-                (const :header) (choice (const nil :tag "No header") file)
+                (const :header) (choice (const :tag "No header" nil) file)
                 (const :needle) (choice (vector string)
                                         (repeat (vector string)))
                 (const :spdx) string)))
@@ -131,8 +131,8 @@ The SPEC recognises these properties:
   :type '(alist :key-type string :value-type (choice string function)))
 
 (defcustom headlice-license-filenames
-  '("LICENSE" "LICENCE" "LICENSE.txt" "LICENSE.md" "LICENSE.rst"
-    "LICENCE" "LICENCE" "LICENCE.txt" "LICENCE.md" "LICENCE.rst"
+  '("LICENSE" "LICENSE.txt" "LICENSE.md" "LICENSE.rst"
+    "LICENCE" "LICENCE.txt" "LICENCE.md" "LICENCE.rst"
     "COPYING" "COPYING.txt" "COPYING.org" "COPYING.md" "COPYING.rst"
     "README" "README.txt" "README.org" "README.md" "README.rst")
   "List of possible license filenames to search for in the project root."
@@ -149,7 +149,7 @@ The SPEC recognises these properties:
 (defcustom headlice-use-spdx-headers nil
   "Whether SPDX headers should be used.
 This can either be t/nil, or a list of licenses which SPDX should be used for."
-  :type '(choice (const t :tag "Always") (const nil :tag "Never")
+  :type '(choice (const :tag "Always" t) (const :tag "Never" nil)
           (repeat symbol)))
 
 (defcustom headlice-state-copyright-holder t
@@ -188,16 +188,15 @@ See `headlice-license-specs' for a list of known license."
 ;;;; Internal variables:
 
 (defconst headlice--copyright-regexp
-  "[Cc]opyright:?\\s *\\(?:©\\|(C)\\|(c)\\)\\s *\\([0-9-, ]+\\)\\s *\\([^\n]+\\)")
+  ;; The ©/(C) sigil is optional (Apache omits it), so the year must lead with a
+  ;; digit to keep prose like "copyright holder" from matching.
+  "[Cc]opyright:?\\s *\\(?:\\(?:©\\|([Cc])\\)\\s *\\)?\\([0-9][0-9-, ]*\\)\\s *\\([^\n]+\\)")
 
 (defconst headlice--spdx-text-regexp
   "SPDX-FileCopyrightText:\\s *©? *\\([0-9-, ]+\\)\\s *\\([^\n]+\\)")
 
 (defconst headlice--spdx-license-regexp
   "SPDX-License-Identifier: \\([^ \t\n]+\\)")
-
-(defconst headlice--copyright-holder-email-regexp
-  "[^<]+<[^>]@[^>]>")
 
 (defvar headlice--cache (make-hash-table :test 'equal)
   "Cache of detected licenses. Maps project roots to cached results.")
@@ -283,7 +282,7 @@ If a license could be identified, this result is cached."
     (dolist (filename headlice-license-filenames)
       (when (and (not license)
                  (file-exists-p (file-name-concat dir filename)))
-        (unless (string-match-p "readme" filename)
+        (unless (string-equal-ignore-case (file-name-base filename) "README")
           (setq non-readme-licensefile t))
         (with-temp-buffer
           (insert-file-contents (file-name-concat dir filename))
@@ -479,8 +478,8 @@ Returns all unique return values of FN."
            do (push result results))
           results)
       (dotimes (_ headlice--files-to-sample)
-        (push (funcall fn (car (elt code-files (random nfiles))))
-              results)))
+        (when-let ((result (funcall fn (car (elt code-files (random nfiles))))))
+          (push result results))))
     (setq results (delete-dups results))
     results))
 
@@ -509,16 +508,18 @@ The following special forms an interpreted when INTERPRET-SPECIAL-P is non-nil:
         (while (and (not (eobp)) (< words-count word-limit))
           (let ((syntax (syntax-class (syntax-after (point)))))
             (cond
-             ((and interpret-special-p
-                   (eq (char-after) ?{)
-                   (re-search-forward "{{\\([^\n]*?\\)}}" nil t))
-              (push (cons 'placeholder (match-string 1)) words))
-             ((and interpret-special-p
-                   (eq (char-after) ??)
-                   (re-search-forward "\\?\\?\\([^[^\n]*?\\)\\?\\?" nil t))
-              (dolist (word (split-string (downcase (match-string 1)) "\\Sw" t))
-                (push (cons 'optional word) words)
-                (cl-incf words-count)))
+             ;; Anchored, so a stray "{" or "?" is read as ordinary text
+             ;; instead of consuming everything up to a distant special form.
+             ((and interpret-special-p (looking-at "{{\\([^\n]*?\\)}}"))
+              (push (cons 'placeholder (match-string 1)) words)
+              (goto-char (match-end 0)))
+             ((and interpret-special-p (looking-at "\\?\\?\\([^?\n]*?\\)\\?\\?"))
+              ;; Move first: `split-string' clobbers the match data.
+              (let ((contents (match-string 1)))
+                (goto-char (match-end 0))
+                (dolist (word (split-string (downcase contents) "\\Sw" t))
+                  (push (cons 'optional word) words)
+                  (cl-incf words-count))))
              ((memq syntax '(1 2))
               (skip-syntax-forward (string (syntax-class-to-char syntax)))
               (push (cons pos (downcase (buffer-substring-no-properties pos (point))))
@@ -672,8 +673,7 @@ similar files."
         (normal-mode))
       (comment-normalize-vars)
       (headlice-auto-insert license 1)
-      (save-buffer)
-      (set-buffer-modified-p nil))
+      (save-buffer))
     t))
 
 (defun headlice--add-email-to-author (placeholders)
@@ -726,8 +726,12 @@ CREATE-LICENSE-P is set."
 
 ;;;###autoload
 (defun headlice-status (&optional dir)
-  "Report on the licensing status of the files in DIR (the current project)."
-  (interactive "P")
+  "Report on the licensing status of the files in DIR (the current project).
+
+With \\[universal-argument] prefix, ask for the directory to report on."
+  (interactive
+   (list (when current-prefix-arg
+           (read-directory-name "Report on directory: "))))
   (let* ((status (headlice-project-status dir))
          (files (plist-get status :files))
          (authors (plist-get status :authors))
@@ -916,7 +920,8 @@ license is created, and what kind of license is used."
                  (when (string-prefix-p license-dir file)
                    (remhash file headlice--cache)))
                headlice--cache)
-              (puthash (file-name-directory buffer-file-name)
+              ;; Keyed as `headlice--project-license' looks it up, sans slash.
+              (puthash (directory-file-name license-dir)
                        (cons selected-license filled-specs)
                        headlice--cache)))
           (message "Created license file %s" (propertize (buffer-file-name) 'face 'font-lock-builtin-face)))
@@ -958,9 +963,9 @@ MODE-CACHE may be provided to speed up or record file mode identification."
            ((directory-name-p path) ; Find code files under directory
             (dolist (subpath (directory-files path t))
               (cond
-               ((member (file-name-base subpath) ignored-dirnames))
                ((file-directory-p subpath)
-                (push (cons (file-name-as-directory subpath) 'directory) path-queue))
+                (unless (member (file-name-nondirectory subpath) ignored-dirnames)
+                  (push (cons (file-name-as-directory subpath) 'directory) path-queue)))
                ((setq kind (headlice--prog-file-kind subpath prog-cache))
                 (push (cons subpath kind) path-queue)))))
            ((file-regular-p path)
